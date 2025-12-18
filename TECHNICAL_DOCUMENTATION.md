@@ -71,6 +71,9 @@ A three-tier architecture for calculating astrological charts and transits:
 - **timezonefinder** - Location to timezone conversion
 - **pytz** - Timezone handling
 - **uvicorn** - ASGI server
+- **slowapi** - Rate limiting middleware
+- **python-json-logger** - Structured JSON logging
+- **pydantic** - Data validation and settings management
 
 ### Frontend
 - **Google Apps Script** (JavaScript ES6)
@@ -305,6 +308,141 @@ const options = {
 - Returns 403 for missing/invalid keys
 - Health check endpoint (/) remains public
 
+**API Key Rotation Policy:**
+- Recommended rotation: Every 90 days
+- Generate new key: `openssl rand -hex 32`
+- Update Railway environment variable
+- Update both Google Apps Scripts with new key
+- Monitor logs for old key usage before retiring
+
+---
+
+## Security Features
+
+### Defense-in-Depth Architecture
+
+The API implements multiple layers of security protection:
+
+**Layer 1: API Key Authentication**
+- Header-based authentication (`X-API-Key`)
+- Environment variable configuration
+- Secure logging with key hashing (SHA-256)
+- Invalid attempts logged with IP address
+
+**Layer 2: Rate Limiting**
+```python
+# Endpoint-specific limits
+/api/planets:  100 requests/minute
+/api/houses:   100 requests/minute
+/api/chart:    100 requests/minute
+/api/transits: 20 requests/minute  # Lower due to computational cost
+```
+- Uses `slowapi` library
+- IP-based throttling
+- Returns 429 (Too Many Requests) when exceeded
+- Protects against DoS attacks and abuse
+
+**Layer 3: CORS Restrictions**
+```python
+# Only allowed origins
+https://docs.google.com
+https://script.google.com
+https://accounts.google.com
+```
+- Prevents unauthorized browser-based access
+- Blocks cross-origin requests from unknown domains
+- Development mode allows localhost
+
+**Layer 4: Security Headers**
+All responses include hardened security headers:
+- `X-Content-Type-Options: nosniff` - Prevent MIME sniffing
+- `X-Frame-Options: DENY` - Prevent clickjacking
+- `X-XSS-Protection: 1; mode=block` - Enable XSS filtering
+- `Strict-Transport-Security: max-age=31536000; includeSubDomains` - Force HTTPS
+- `Content-Security-Policy: default-src 'self'` - Restrict resource loading
+- `Referrer-Policy: strict-origin-when-cross-origin` - Limit referrer data
+- `Permissions-Policy: geolocation=(), microphone=(), camera=()` - Disable sensitive APIs
+
+**Layer 5: Input Validation**
+Comprehensive validation on all request fields using Pydantic:
+
+```python
+# Date/Time validation
+- year: 1800-2200
+- month: 1-12
+- day: 1-31
+- hour: 0-23
+- minute: 0-59
+
+# Geographic validation
+- latitude: -90 to 90
+- longitude: -180 to 180
+
+# Astrological validation
+- house_type: must be in allowed list
+- natal_positions: validated longitude ranges (0-360)
+- aspect_names: validated against known aspects
+- orbs: positive numbers only
+```
+
+**Layer 6: Structured Logging**
+```python
+# JSON-formatted logs for security monitoring
+{
+  "timestamp": "2025-12-18T10:30:45.123Z",
+  "level": "WARNING",
+  "message": "Invalid API key attempt",
+  "client_ip": "192.168.1.1",
+  "endpoint": "/api/chart",
+  "method": "POST"
+}
+```
+- All authentication attempts logged
+- Failed validations tracked
+- API key hash logged (not plaintext)
+- Enables security incident investigation
+- Compatible with log aggregation tools (Splunk, ELK, etc.)
+
+### Security Best Practices
+
+**For Administrators:**
+1. Rotate API keys every 90 days
+2. Monitor logs for suspicious activity
+3. Review rate limit settings periodically
+4. Keep dependencies updated (`pip list --outdated`)
+5. Never commit API keys to version control
+6. Use strong, random API keys (32+ characters)
+
+**For Users:**
+7. Keep API keys confidential
+8. Don't share Google Sheets with untrusted parties
+9. Use pseudonymization for client data (codes, not names)
+10. Regularly audit who has access to the system
+
+### Incident Response
+
+**If API key is compromised:**
+1. Immediately generate new key: `openssl rand -hex 32`
+2. Update Railway environment variable
+3. Update both Google Apps Scripts
+4. Review logs for unauthorized usage
+5. Document incident and response
+
+**If suspicious activity detected:**
+1. Check structured logs for patterns
+2. Identify source IP addresses
+3. Review rate limit violations
+4. Consider temporary API key rotation
+5. Contact Railway support if needed
+
+### Compliance
+
+The security architecture supports:
+- **GDPR compliance** - Minimal data collection, pseudonymization
+- **SOC 2 controls** - Authentication, logging, access control
+- **HIPAA considerations** - De-identification of sensitive data (if applicable)
+- **Privacy by Design** - Security built into architecture, not bolted on
+
 ---
 
 ## Google Apps Script Integration
@@ -439,10 +577,15 @@ CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
 # 1. Configuration & Setup
 app = FastAPI()
 API_KEY = os.getenv("API_KEY")
-CORS middleware setup
+Structured JSON logging setup
+Rate limiter configuration
+Restricted CORS middleware (Google domains only)
+Security headers middleware
 
-# 2. Authentication
-verify_api_key() - API key validation
+# 2. Authentication & Security
+verify_api_key() - API key validation with logging
+add_security_headers() - Security headers middleware
+Rate limiting decorators on all endpoints
 
 # 3. Helper Functions
 lon_to_sign_degree() - Convert longitude to sign/degree
