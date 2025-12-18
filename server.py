@@ -269,17 +269,73 @@ def angle_separation(lon1: float, lon2: float) -> float:
     diff = abs((lon1 - lon2) % 360)
     return diff if diff <= 180 else 360 - diff
 
+def get_transit_lon(jd: float, planet_id: int) -> float:
+    """Get transit planet longitude at Julian Day"""
+    xx, _ = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+    return xx[0]
+
+def sep_func(jd: float, natal_lon: float, planet_id: int) -> float:
+    """Calculate separation between transit and natal planet"""
+    return angle_separation(get_transit_lon(jd, planet_id), natal_lon)
+
+def gfunc(jd: float, natal_lon: float, planet_id: int, angle: float) -> float:
+    """Function for finding aspect crossings"""
+    return angle_separation(get_transit_lon(jd, planet_id), natal_lon) - angle
+
+def bisect_root(j1: float, j2: float, natal_lon: float, planet_id: int, angle: float, tol: float = 1e-5) -> float:
+    """Find exact aspect using bisection method"""
+    f1 = gfunc(j1, natal_lon, planet_id, angle)
+    f2 = gfunc(j2, natal_lon, planet_id, angle)
+
+    if f1 == 0.0:
+        return j1
+    if f2 == 0.0:
+        return j2
+    if f1 * f2 > 0:
+        return None
+
+    a, b = j1, j2
+    for _ in range(60):
+        m = (a + b) / 2.0
+        fm = gfunc(m, natal_lon, planet_id, angle)
+        if abs(fm) < tol:
+            return m
+        if f1 * fm <= 0:
+            b = m
+            f2 = fm
+        else:
+            a = m
+            f1 = fm
+    return (a + b) / 2.0
+
+def find_min_sep_jd(j1: float, j2: float, natal_lon: float, planet_id: int) -> float:
+    """Find local minimum separation using ternary search"""
+    a, b = j1, j2
+    for _ in range(40):
+        m1 = a + (b - a) / 3.0
+        m2 = b - (b - a) / 3.0
+        f1 = sep_func(m1, natal_lon, planet_id)
+        f2 = sep_func(m2, natal_lon, planet_id)
+        if f1 < f2:
+            b = m2
+        else:
+            a = m1
+    return (a + b) / 2.0
+
 @app.post("/api/transits")
 def get_transits(request: TransitRequest):
-    """Calculate transits - server-side scanning for speed"""
+    """Calculate exact transits using precision algorithms"""
     try:
         transits = []
 
-        # Parse dates
+        # Parse dates and convert to Julian Days
         start_dt = datetime.fromisoformat(request.start_date)
         end_dt = datetime.fromisoformat(request.end_date)
 
-        # Map planet names to IDs
+        start_jd = swe.julday(start_dt.year, start_dt.month, start_dt.day, 0.0, swe.GREG_CAL)
+        end_jd = swe.julday(end_dt.year, end_dt.month, end_dt.day, 0.0, swe.GREG_CAL)
+
+        # Planet IDs
         planet_ids = {
             "jupiter": swe.JUPITER,
             "saturn": swe.SATURN,
@@ -287,6 +343,18 @@ def get_transits(request: TransitRequest):
             "neptune": swe.NEPTUNE,
             "pluto": swe.PLUTO
         }
+
+        # Tolerances (from Python code)
+        tolerances = {
+            "Conjunction": 0.002,
+            "Square": 0.004,
+            "Opposition": 0.006,
+            "Quincunx": 0.004
+        }
+
+        # Step sizes
+        STEP_CONJ = 0.05  # Days
+        STEP_OTHER = 0.1  # Days
 
         # For each transiting planet
         for transit_planet_name in request.transiting_planets:
@@ -300,59 +368,100 @@ def get_transits(request: TransitRequest):
 
                 # For each aspect
                 for aspect_name, aspect_data in request.aspects.items():
+                    angle = aspect_data["angle"]
+                    tol = tolerances.get(aspect_name, 0.004)
+                    last_root = None
 
-                    # Scan dates
-                    current_dt = start_dt
-                    while current_dt <= end_dt:
-                        # Calculate Julian Day
-                        jd = swe.julday(current_dt.year, current_dt.month, current_dt.day,
-                                       current_dt.hour + current_dt.minute / 60.0, swe.GREG_CAL)
+                    # CONJUNCTIONS - find local minimums
+                    if angle == 0.0:
+                        jd = start_jd
+                        prev_jd = jd
+                        prev_sep = sep_func(jd, natal_lon, planet_id)
+                        jd += STEP_CONJ
 
-                        # Get transiting planet position
-                        try:
-                            xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
-                        except:
-                            xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_MOSEPH | swe.FLG_SPEED)
+                        curr_jd = jd
+                        curr_sep = sep_func(jd, natal_lon, planet_id)
+                        jd += STEP_CONJ
 
-                        transit_lon = xx[0]
+                        while jd <= end_jd:
+                            next_jd = jd
+                            next_sep = sep_func(jd, natal_lon, planet_id)
 
-                        # Check if aspect is forming
-                        separation = angle_separation(transit_lon, natal_lon)
-                        orb_from_exact = abs(separation - aspect_data["angle"])
+                            # Check for local minimum
+                            if prev_sep > curr_sep < next_sep:
+                                jd_min = find_min_sep_jd(prev_jd, next_jd, natal_lon, planet_id)
+                                sep_min = sep_func(jd_min, natal_lon, planet_id)
 
-                        if orb_from_exact <= aspect_data["orb"]:
-                            # Found a transit!
-                            transit_sign_data = lon_to_sign_degree(transit_lon)
-                            natal_sign_data = lon_to_sign_degree(natal_lon)
+                                if abs(sep_min - angle) < tol:
+                                    if last_root is None or abs(jd_min - last_root) > 1e-3:
+                                        transits.append((jd_min, transit_planet_name, natal_planet, aspect_name, sep_min))
+                                        last_root = jd_min
 
-                            transits.append({
-                                "date": current_dt.isoformat(),
-                                "transit_planet": transit_planet_name,
-                                "natal_planet": natal_planet,
-                                "aspect": aspect_name,
-                                "separation": round(separation, 6),
-                                "orb": round(orb_from_exact, 6),
-                                "transit_longitude": round(transit_lon, 6),
-                                "natal_longitude": round(natal_lon, 6),
-                                "transit_sign": transit_sign_data["sign"],
-                                "transit_degree": round(transit_sign_data["degree"], 4),
-                                "natal_sign": natal_sign_data["sign"],
-                                "natal_degree": round(natal_sign_data["degree"], 4)
-                            })
+                            prev_jd, prev_sep = curr_jd, curr_sep
+                            curr_jd, curr_sep = next_jd, next_sep
+                            jd += STEP_CONJ
 
-                            # Skip ahead to avoid duplicates
-                            current_dt += timedelta(days=30)
-                            continue
+                    # OTHER ASPECTS - find sign changes with bisection
+                    else:
+                        jd = start_jd
+                        while jd < end_jd:
+                            jd2 = min(jd + STEP_OTHER, end_jd)
 
-                        # Move to next date
-                        current_dt += timedelta(days=request.step_days)
+                            f1 = gfunc(jd, natal_lon, planet_id, angle)
+                            f2 = gfunc(jd2, natal_lon, planet_id, angle)
+
+                            root = None
+                            if f1 == 0.0:
+                                root = jd
+                            elif f2 == 0.0:
+                                root = jd2
+                            elif f1 * f2 < 0.0:
+                                root = bisect_root(jd, jd2, natal_lon, planet_id, angle)
+
+                            if root is not None:
+                                sep = angle_separation(get_transit_lon(root, planet_id), natal_lon)
+                                if abs(sep - angle) < tol:
+                                    if last_root is None or abs(root - last_root) > 1e-3:
+                                        transits.append((root, transit_planet_name, natal_planet, aspect_name, sep))
+                                        last_root = root
+
+                            jd = jd2
+
+        # Convert to output format
+        result_transits = []
+        for jd_ut, tname, nname, aspect_name, sep in transits:
+            # Convert JD back to datetime
+            y, m, d, fh = swe.revjul(jd_ut, swe.GREG_CAL)
+            H = int(fh)
+            M = int((fh - H) * 60)
+            S = int((((fh - H) * 60) - M) * 60)
+            dt = datetime(y, m, d, H, M, S)
+
+            # Get positions
+            transit_lon = get_transit_lon(jd_ut, planet_ids[tname])
+            transit_sign_data = lon_to_sign_degree(transit_lon)
+            natal_sign_data = lon_to_sign_degree(natal_lon)
+
+            result_transits.append({
+                "date": dt.isoformat(),
+                "transit_planet": tname,
+                "natal_planet": nname,
+                "aspect": aspect_name,
+                "separation": round(sep, 6),
+                "transit_longitude": round(transit_lon, 6),
+                "natal_longitude": round(natal_lon, 6),
+                "transit_sign": transit_sign_data["sign"],
+                "transit_degree": round(transit_sign_data["degree"], 4),
+                "natal_sign": natal_sign_data["sign"],
+                "natal_degree": round(natal_sign_data["degree"], 4)
+            })
 
         # Sort by date
-        transits.sort(key=lambda x: x["date"])
+        result_transits.sort(key=lambda x: x["date"])
 
         return {
-            "transits": transits,
-            "count": len(transits)
+            "transits": result_transits,
+            "count": len(result_transits)
         }
 
     except Exception as e:
