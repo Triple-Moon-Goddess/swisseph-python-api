@@ -114,8 +114,12 @@ def get_planets(request: ChartRequest):
         # Calculate each planet
         for name, planet_id in PLANETS.items():
             try:
-                # Calculate planet position
-                xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+                # Try Swiss Ephemeris first, fall back to Moshier for asteroids
+                try:
+                    xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+                except:
+                    # Use Moshier ephemeris for asteroids (built-in, no files needed)
+                    xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_MOSEPH | swe.FLG_SPEED)
 
                 longitude = xx[0]
                 speed = xx[3]
