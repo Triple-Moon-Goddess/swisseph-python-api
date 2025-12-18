@@ -47,7 +47,7 @@ PLANETS = {
     "pallas": swe.PALLAS,
     "juno": swe.JUNO,
     "vesta": swe.VESTA,
-    "lilith": swe.MEAN_APOG  # Black Moon Lilith (Mean)
+    "lilith": swe.OSCU_APOG  # Black Moon Lilith (True/Osculating)
 }
 
 HOUSE_SYSTEMS = {
