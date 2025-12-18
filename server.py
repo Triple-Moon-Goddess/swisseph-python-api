@@ -7,8 +7,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import swisseph as swe
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict
 
 app = FastAPI(title="Swiss Ephemeris API", version="1.0.0")
 
@@ -230,6 +230,116 @@ def get_chart(request: ChartRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error calculating chart: {str(e)}")
+
+# Transit Request Model
+class TransitRequest(BaseModel):
+    natal_positions: Dict[str, float]  # e.g., {"Sun": 26.57, "Moon": 109.35, ...}
+    start_date: str  # ISO format: "2025-12-17"
+    end_date: str    # ISO format: "2026-12-17"
+    lat: float
+    lon: float
+    transiting_planets: Optional[List[str]] = ["jupiter", "saturn", "uranus", "neptune", "pluto"]
+    aspects: Optional[Dict[str, Dict]] = {
+        "Conjunction": {"angle": 0, "orb": 1.0},
+        "Square": {"angle": 90, "orb": 1.0},
+        "Opposition": {"angle": 180, "orb": 1.0},
+        "Quincunx": {"angle": 150, "orb": 1.0}
+    }
+    step_days: Optional[int] = 7
+
+def angle_separation(lon1: float, lon2: float) -> float:
+    """Calculate angle separation between two longitudes"""
+    diff = abs((lon1 - lon2) % 360)
+    return diff if diff <= 180 else 360 - diff
+
+@app.post("/api/transits")
+def get_transits(request: TransitRequest):
+    """Calculate transits - server-side scanning for speed"""
+    try:
+        transits = []
+
+        # Parse dates
+        start_dt = datetime.fromisoformat(request.start_date)
+        end_dt = datetime.fromisoformat(request.end_date)
+
+        # Map planet names to IDs
+        planet_ids = {
+            "jupiter": swe.JUPITER,
+            "saturn": swe.SATURN,
+            "uranus": swe.URANUS,
+            "neptune": swe.NEPTUNE,
+            "pluto": swe.PLUTO
+        }
+
+        # For each transiting planet
+        for transit_planet_name in request.transiting_planets:
+            if transit_planet_name not in planet_ids:
+                continue
+
+            planet_id = planet_ids[transit_planet_name]
+
+            # For each natal planet
+            for natal_planet, natal_lon in request.natal_positions.items():
+
+                # For each aspect
+                for aspect_name, aspect_data in request.aspects.items():
+
+                    # Scan dates
+                    current_dt = start_dt
+                    while current_dt <= end_dt:
+                        # Calculate Julian Day
+                        jd = swe.julday(current_dt.year, current_dt.month, current_dt.day,
+                                       current_dt.hour + current_dt.minute / 60.0, swe.GREG_CAL)
+
+                        # Get transiting planet position
+                        try:
+                            xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+                        except:
+                            xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_MOSEPH | swe.FLG_SPEED)
+
+                        transit_lon = xx[0]
+
+                        # Check if aspect is forming
+                        separation = angle_separation(transit_lon, natal_lon)
+                        orb_from_exact = abs(separation - aspect_data["angle"])
+
+                        if orb_from_exact <= aspect_data["orb"]:
+                            # Found a transit!
+                            transit_sign_data = lon_to_sign_degree(transit_lon)
+                            natal_sign_data = lon_to_sign_degree(natal_lon)
+
+                            transits.append({
+                                "date": current_dt.isoformat(),
+                                "transit_planet": transit_planet_name,
+                                "natal_planet": natal_planet,
+                                "aspect": aspect_name,
+                                "separation": round(separation, 6),
+                                "orb": round(orb_from_exact, 6),
+                                "transit_longitude": round(transit_lon, 6),
+                                "natal_longitude": round(natal_lon, 6),
+                                "transit_sign": transit_sign_data["sign"],
+                                "transit_degree": round(transit_sign_data["degree"], 4),
+                                "natal_sign": natal_sign_data["sign"],
+                                "natal_degree": round(natal_sign_data["degree"], 4)
+                            })
+
+                            # Skip ahead to avoid duplicates
+                            current_dt += timedelta(days=30)
+                            continue
+
+                        # Move to next date
+                        current_dt += timedelta(days=request.step_days)
+
+        # Sort by date
+        transits.sort(key=lambda x: x["date"])
+
+        return {
+            "transits": transits,
+            "count": len(transits)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating transits: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
