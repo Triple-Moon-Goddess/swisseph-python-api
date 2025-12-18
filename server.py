@@ -9,6 +9,8 @@ from pydantic import BaseModel
 import swisseph as swe
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
+from timezonefinder import TimezoneFinder
+import pytz
 
 app = FastAPI(title="Swiss Ephemeris API", version="1.0.0")
 
@@ -98,8 +100,25 @@ def lon_to_sign_degree(lon: float):
         "full_degree": lon
     }
 
-def calculate_julian_day(year: int, month: int, day: int, hour: int, minute: int):
-    """Calculate Julian Day"""
+def calculate_julian_day(year: int, month: int, day: int, hour: int, minute: int, lat: float = None, lon: float = None):
+    """Calculate Julian Day - converts local time to UTC if lat/lon provided"""
+    if lat is not None and lon is not None:
+        # Find timezone and convert local time to UTC
+        tf = TimezoneFinder()
+        tz_name = tf.timezone_at(lat=lat, lng=lon)
+
+        if tz_name:
+            try:
+                local_tz = pytz.timezone(tz_name)
+                local_dt = local_tz.localize(datetime(year, month, day, hour, minute))
+                utc_dt = local_dt.astimezone(pytz.utc)
+
+                decimal_hour = utc_dt.hour + utc_dt.minute / 60.0 + utc_dt.second / 3600.0
+                return swe.julday(utc_dt.year, utc_dt.month, utc_dt.day, decimal_hour, swe.GREG_CAL)
+            except Exception as e:
+                print(f"Timezone conversion failed: {e}, using local time as-is")
+
+    # Fallback: treat as UTC or no timezone info
     decimal_hour = hour + minute / 60.0
     return swe.julday(year, month, day, decimal_hour, swe.GREG_CAL)
 
@@ -122,9 +141,9 @@ def root():
 def get_planets(request: ChartRequest):
     """Get planetary positions"""
     try:
-        # Calculate Julian Day
+        # Calculate Julian Day (with timezone conversion based on location)
         jd = calculate_julian_day(request.year, request.month, request.day,
-                                 request.hour, request.min)
+                                 request.hour, request.min, request.lat, request.lon)
 
         result = {}
 
@@ -171,9 +190,9 @@ def get_planets(request: ChartRequest):
 def get_houses(request: ChartRequest):
     """Get house cusps"""
     try:
-        # Calculate Julian Day
+        # Calculate Julian Day (with timezone conversion based on location)
         jd = calculate_julian_day(request.year, request.month, request.day,
-                                 request.hour, request.min)
+                                 request.hour, request.min, request.lat, request.lon)
 
         # Get house system
         house_system = HOUSE_SYSTEMS.get(request.house_type, b"P")
