@@ -175,6 +175,18 @@ def get_planet_house(planet_lon: float, house_cusps) -> int:
 
     return 1  # Default to house 1 if not found
 
+def get_whole_sign_house(planet_lon: float, ascendant_lon: float) -> int:
+    """Determine which whole sign house a planet is in"""
+    # Get the signs (0-11) for planet and ascendant
+    planet_sign = int((planet_lon % 360.0) // 30)
+    asc_sign = int((ascendant_lon % 360.0) // 30)
+
+    # Calculate house number (1-12)
+    # In whole sign: if ASC is in Aries (0), then Aries=1st house, Taurus=2nd, etc.
+    house_num = ((planet_sign - asc_sign) % 12) + 1
+
+    return house_num
+
 # API Endpoints
 @app.get("/")
 def root():
@@ -505,9 +517,14 @@ def get_transits(request: TransitRequest):
             transit_sign_data = lon_to_sign_degree(transit_lon)
             natal_sign_data = lon_to_sign_degree(natal_lon_val)
 
-            # Determine which natal house each planet is in
+            # Determine which natal house each planet is in (Placidus/Koch/etc)
             transit_planet_house = get_planet_house(transit_lon, natal_cusps)
             natal_planet_house = get_planet_house(natal_lon_val, natal_cusps)
+
+            # Determine whole sign houses (based on natal ascendant)
+            natal_asc_lon = natal_houses["ascendant"]["longitude"]
+            transit_planet_ws_house = get_whole_sign_house(transit_lon, natal_asc_lon)
+            natal_planet_ws_house = get_whole_sign_house(natal_lon_val, natal_asc_lon)
 
             result_transits.append({
                 "date": dt.isoformat(),
@@ -522,7 +539,9 @@ def get_transits(request: TransitRequest):
                 "natal_sign": natal_sign_data["sign"],
                 "natal_degree": round(natal_sign_data["degree"], 4),
                 "transit_planet_house": transit_planet_house,
-                "natal_planet_house": natal_planet_house
+                "natal_planet_house": natal_planet_house,
+                "transit_planet_ws_house": transit_planet_ws_house,
+                "natal_planet_ws_house": natal_planet_ws_house
             })
 
         # Sort by date
