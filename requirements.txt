@@ -4,3 +4,5 @@ pyswisseph==2.10.3.2
 pydantic==2.5.0
 timezonefinder==6.5.0
 pytz==2024.1
+slowapi==0.1.9
+python-json-logger==2.0.7

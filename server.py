@@ -3,39 +3,105 @@ Swiss Ephemeris Python API Server
 Uses the same Swiss Ephemeris library as your working scripts!
 """
 
-from fastapi import FastAPI, HTTPException, Security, Header
+from fastapi import FastAPI, HTTPException, Security, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, ValidationError
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import swisseph as swe
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from timezonefinder import TimezoneFinder
 import pytz
 import os
+import logging
+import hashlib
+from pythonjsonlogger import jsonlogger
 
+# Configure structured logging
+logHandler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter(
+    '%(asctime)s %(name)s %(levelname)s %(message)s %(pathname)s %(lineno)d'
+)
+logHandler.setFormatter(formatter)
+logger = logging.getLogger(__name__)
+logger.addHandler(logHandler)
+logger.setLevel(logging.INFO)
+
+# Rate limiting
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Swiss Ephemeris API", version="1.0.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # API Key Security
 API_KEY = os.getenv("API_KEY", "your-secret-key-here")
+API_KEY_HASH = hashlib.sha256(API_KEY.encode()).hexdigest()  # For secure logging
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-async def verify_api_key(api_key: str = Security(api_key_header)):
+async def verify_api_key(api_key: str = Security(api_key_header), request: Request = None):
     """Verify the API key from request header"""
+    client_ip = get_remote_address(request) if request else "unknown"
+
     if api_key is None:
+        logger.warning(f"API key missing from {client_ip}")
         raise HTTPException(status_code=403, detail="API key is missing")
+
     if api_key != API_KEY:
+        logger.warning(f"Invalid API key attempt from {client_ip}")
         raise HTTPException(status_code=403, detail="Invalid API key")
+
+    logger.info(f"Successful auth from {client_ip}")
     return api_key
 
-# Enable CORS
+# Restrict CORS to Google domains only
+ALLOWED_ORIGINS = [
+    "https://docs.google.com",
+    "https://script.google.com",
+    "https://accounts.google.com",
+]
+
+# Allow localhost for development
+if os.getenv("ENV") == "development":
+    ALLOWED_ORIGINS.extend(["http://localhost:8000", "http://127.0.0.1:8000"])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
+
+# Security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Add security headers to all responses"""
+    response = await call_next(request)
+
+    # Security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = "default-src 'self'"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+
+    # Log request
+    logger.info(
+        "Request processed",
+        extra={
+            "method": request.method,
+            "path": request.url.path,
+            "client_ip": get_remote_address(request),
+            "status_code": response.status_code,
+        }
+    )
+
+    return response
 
 # Set ephemeris path
 import os
@@ -91,7 +157,7 @@ HOUSE_SYSTEMS = {
     "campanus": b"C"
 }
 
-# Request models
+# Request models with validation
 class ChartRequest(BaseModel):
     year: int
     month: int
@@ -101,6 +167,63 @@ class ChartRequest(BaseModel):
     lat: float
     lon: float
     house_type: Optional[str] = "placidus"
+
+    @field_validator('year')
+    @classmethod
+    def validate_year(cls, v):
+        if v < 1800 or v > 2200:
+            raise ValueError('Year must be between 1800 and 2200')
+        return v
+
+    @field_validator('month')
+    @classmethod
+    def validate_month(cls, v):
+        if v < 1 or v > 12:
+            raise ValueError('Month must be between 1 and 12')
+        return v
+
+    @field_validator('day')
+    @classmethod
+    def validate_day(cls, v):
+        if v < 1 or v > 31:
+            raise ValueError('Day must be between 1 and 31')
+        return v
+
+    @field_validator('hour')
+    @classmethod
+    def validate_hour(cls, v):
+        if v < 0 or v > 23:
+            raise ValueError('Hour must be between 0 and 23')
+        return v
+
+    @field_validator('min')
+    @classmethod
+    def validate_min(cls, v):
+        if v < 0 or v > 59:
+            raise ValueError('Minute must be between 0 and 59')
+        return v
+
+    @field_validator('lat')
+    @classmethod
+    def validate_lat(cls, v):
+        if v < -90 or v > 90:
+            raise ValueError('Latitude must be between -90 and 90')
+        return v
+
+    @field_validator('lon')
+    @classmethod
+    def validate_lon(cls, v):
+        if v < -180 or v > 180:
+            raise ValueError('Longitude must be between -180 and 180')
+        return v
+
+    @field_validator('house_type')
+    @classmethod
+    def validate_house_type(cls, v):
+        valid_types = ['placidus', 'whole_sign', 'koch', 'equal', 'campanus']
+        if v not in valid_types:
+            raise ValueError(f'House type must be one of: {", ".join(valid_types)}')
+        return v
 
 # Helper functions
 def lon_to_sign_degree(lon: float):
@@ -217,8 +340,10 @@ def root():
     }
 
 @app.post("/api/planets")
-def get_planets(request: ChartRequest, api_key: str = Security(verify_api_key)):
+@limiter.limit("100/minute")
+def get_planets(request: ChartRequest, fastapi_request: Request, api_key: str = Security(verify_api_key)):
     """Get planetary positions"""
+    logger.info(f"Planets calculation requested for {request.year}-{request.month}-{request.day}")
     try:
         # Calculate Julian Day (with timezone conversion based on location)
         jd = calculate_julian_day(request.year, request.month, request.day,
@@ -266,8 +391,10 @@ def get_planets(request: ChartRequest, api_key: str = Security(verify_api_key)):
         raise HTTPException(status_code=500, detail=f"Error calculating planets: {str(e)}")
 
 @app.post("/api/houses")
-def get_houses(request: ChartRequest, api_key: str = Security(verify_api_key)):
+@limiter.limit("100/minute")
+def get_houses(request: ChartRequest, fastapi_request: Request, api_key: str = Security(verify_api_key)):
     """Get house cusps"""
+    logger.info(f"Houses calculation requested for {request.year}-{request.month}-{request.day}")
     try:
         # Calculate Julian Day (with timezone conversion based on location)
         jd = calculate_julian_day(request.year, request.month, request.day,
@@ -307,8 +434,10 @@ def get_houses(request: ChartRequest, api_key: str = Security(verify_api_key)):
         raise HTTPException(status_code=500, detail=f"Error calculating houses: {str(e)}")
 
 @app.post("/api/chart")
-def get_chart(request: ChartRequest, api_key: str = Security(verify_api_key)):
+@limiter.limit("100/minute")
+def get_chart(request: ChartRequest, fastapi_request: Request, api_key: str = Security(verify_api_key)):
     """Get complete chart data (planets + houses)"""
+    logger.info(f"Complete chart requested for {request.year}-{request.month}-{request.day}")
     try:
         # Calculate Julian Day
         jd = calculate_julian_day(request.year, request.month, request.day,
@@ -365,7 +494,7 @@ def get_chart(request: ChartRequest, api_key: str = Security(verify_api_key)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error calculating chart: {str(e)}")
 
-# Transit Request Model
+# Transit Request Model with validation
 class TransitRequest(BaseModel):
     natal_positions: Dict[str, float]  # e.g., {"Sun": 26.57, "Moon": 109.35, ...}
     start_date: str  # ISO format: "2025-12-17"
@@ -387,6 +516,81 @@ class TransitRequest(BaseModel):
         "Quincunx": {"angle": 150, "orb": 1.0}
     }
     step_days: Optional[int] = 7
+
+    @field_validator('natal_positions')
+    @classmethod
+    def validate_natal_positions(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('Natal positions cannot be empty')
+        for planet, lon in v.items():
+            if lon < 0 or lon > 360:
+                raise ValueError(f'{planet} longitude must be between 0 and 360')
+        return v
+
+    @field_validator('start_date', 'end_date')
+    @classmethod
+    def validate_date(cls, v):
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError('Date must be in ISO format (YYYY-MM-DD)')
+        return v
+
+    @field_validator('lat')
+    @classmethod
+    def validate_lat(cls, v):
+        if v < -90 or v > 90:
+            raise ValueError('Latitude must be between -90 and 90')
+        return v
+
+    @field_validator('lon')
+    @classmethod
+    def validate_lon(cls, v):
+        if v < -180 or v > 180:
+            raise ValueError('Longitude must be between -180 and 180')
+        return v
+
+    @field_validator('birth_year')
+    @classmethod
+    def validate_birth_year(cls, v):
+        if v < 1800 or v > 2200:
+            raise ValueError('Birth year must be between 1800 and 2200')
+        return v
+
+    @field_validator('birth_month')
+    @classmethod
+    def validate_birth_month(cls, v):
+        if v < 1 or v > 12:
+            raise ValueError('Birth month must be between 1 and 12')
+        return v
+
+    @field_validator('birth_day')
+    @classmethod
+    def validate_birth_day(cls, v):
+        if v < 1 or v > 31:
+            raise ValueError('Birth day must be between 1 and 31')
+        return v
+
+    @field_validator('birth_hour')
+    @classmethod
+    def validate_birth_hour(cls, v):
+        if v < 0 or v > 23:
+            raise ValueError('Birth hour must be between 0 and 23')
+        return v
+
+    @field_validator('birth_min')
+    @classmethod
+    def validate_birth_min(cls, v):
+        if v < 0 or v > 59:
+            raise ValueError('Birth minute must be between 0 and 59')
+        return v
+
+    @field_validator('step_days')
+    @classmethod
+    def validate_step_days(cls, v):
+        if v and (v < 1 or v > 30):
+            raise ValueError('Step days must be between 1 and 30')
+        return v
 
 def angle_separation(lon1: float, lon2: float) -> float:
     """Calculate angle separation between two longitudes"""
@@ -447,8 +651,10 @@ def find_min_sep_jd(j1: float, j2: float, natal_lon: float, planet_id: int) -> f
     return (a + b) / 2.0
 
 @app.post("/api/transits")
-def get_transits(request: TransitRequest, api_key: str = Security(verify_api_key)):
+@limiter.limit("20/minute")  # Lower limit for expensive transit calculations
+def get_transits(request: TransitRequest, fastapi_request: Request, api_key: str = Security(verify_api_key)):
     """Calculate exact transits using precision algorithms"""
+    logger.info(f"Transit calculation requested: {request.start_date} to {request.end_date}")
     try:
         transits = []
 
