@@ -56,11 +56,11 @@ PLANETS = {
     "neptune": swe.NEPTUNE,
     "pluto": swe.PLUTO,
     "true_node": swe.TRUE_NODE,
-    "chiron": swe.CHIRON,
-    "ceres": swe.CERES,
-    "pallas": swe.PALLAS,
-    "juno": swe.JUNO,
-    "vesta": swe.VESTA,
+    "chiron": 15,  # SE_CHIRON
+    "ceres": 17,   # SE_CERES
+    "pallas": 18,  # SE_PALLAS
+    "juno": 19,    # SE_JUNO
+    "vesta": 20,   # SE_VESTA
     "lilith": swe.OSCU_APOG  # Black Moon Lilith (True/Osculating)
 }
 
