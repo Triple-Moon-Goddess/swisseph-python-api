@@ -18,10 +18,10 @@ def download_asteroid_files():
     """Download asteroid ephemeris files"""
     ephe_dir = '/app/ephe'
 
-    # Try different base URLs
+    # Try different base URLs (GitHub is currently working)
     base_urls = [
-        'http://www.astro.com/ftp/swisseph/ephe',
         'https://github.com/aloistr/swisseph/raw/master/ephe',
+        'http://www.astro.com/ftp/swisseph/ephe',
     ]
 
     for num, subdir, filename in asteroids:
