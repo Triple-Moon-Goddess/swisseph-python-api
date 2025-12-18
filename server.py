@@ -3,16 +3,30 @@ Swiss Ephemeris Python API Server
 Uses the same Swiss Ephemeris library as your working scripts!
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Security, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 import swisseph as swe
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from timezonefinder import TimezoneFinder
 import pytz
+import os
 
 app = FastAPI(title="Swiss Ephemeris API", version="1.0.0")
+
+# API Key Security
+API_KEY = os.getenv("API_KEY", "your-secret-key-here")
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def verify_api_key(api_key: str = Security(api_key_header)):
+    """Verify the API key from request header"""
+    if api_key is None:
+        raise HTTPException(status_code=403, detail="API key is missing")
+    if api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+    return api_key
 
 # Enable CORS
 app.add_middleware(
@@ -203,7 +217,7 @@ def root():
     }
 
 @app.post("/api/planets")
-def get_planets(request: ChartRequest):
+def get_planets(request: ChartRequest, api_key: str = Security(verify_api_key)):
     """Get planetary positions"""
     try:
         # Calculate Julian Day (with timezone conversion based on location)
@@ -252,7 +266,7 @@ def get_planets(request: ChartRequest):
         raise HTTPException(status_code=500, detail=f"Error calculating planets: {str(e)}")
 
 @app.post("/api/houses")
-def get_houses(request: ChartRequest):
+def get_houses(request: ChartRequest, api_key: str = Security(verify_api_key)):
     """Get house cusps"""
     try:
         # Calculate Julian Day (with timezone conversion based on location)
@@ -293,11 +307,55 @@ def get_houses(request: ChartRequest):
         raise HTTPException(status_code=500, detail=f"Error calculating houses: {str(e)}")
 
 @app.post("/api/chart")
-def get_chart(request: ChartRequest):
+def get_chart(request: ChartRequest, api_key: str = Security(verify_api_key)):
     """Get complete chart data (planets + houses)"""
     try:
-        planets = get_planets(request)
-        houses = get_houses(request)
+        # Calculate Julian Day
+        jd = calculate_julian_day(request.year, request.month, request.day,
+                                 request.hour, request.min, request.lat, request.lon)
+
+        # Get planets
+        planets = {}
+        for name, planet_id in PLANETS.items():
+            try:
+                xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+                longitude = xx[0]
+                speed = xx[3]
+                sign_data = lon_to_sign_degree(longitude)
+
+                planets[name] = {
+                    "longitude": longitude,
+                    "full_degree": sign_data["full_degree"],
+                    "normDegree": sign_data["full_degree"],
+                    "sign": sign_data["sign"],
+                    "degree": sign_data["degree"],
+                    "speed": speed,
+                    "isRetro": "true" if speed < 0 else "false"
+                }
+            except:
+                continue
+
+        # Get houses
+        houses_data, cusps = calculate_houses_for_jd(jd, request.lat, request.lon, request.house_type)
+
+        houses = {}
+        houses["ascendant"] = {
+            "longitude": houses_data["ascendant"]["longitude"],
+            "full_degree": houses_data["ascendant"]["longitude"],
+            **houses_data["ascendant"]
+        }
+        houses["midheaven"] = {
+            "longitude": houses_data["midheaven"]["longitude"],
+            "full_degree": houses_data["midheaven"]["longitude"],
+            **houses_data["midheaven"]
+        }
+        for i in range(12):
+            house_key = f"house{i+1}"
+            houses[house_key] = {
+                "longitude": houses_data[house_key]["longitude"],
+                "full_degree": houses_data[house_key]["longitude"],
+                **houses_data[house_key]
+            }
 
         return {
             "planets": planets,
@@ -389,7 +447,7 @@ def find_min_sep_jd(j1: float, j2: float, natal_lon: float, planet_id: int) -> f
     return (a + b) / 2.0
 
 @app.post("/api/transits")
-def get_transits(request: TransitRequest):
+def get_transits(request: TransitRequest, api_key: str = Security(verify_api_key)):
     """Calculate exact transits using precision algorithms"""
     try:
         transits = []
