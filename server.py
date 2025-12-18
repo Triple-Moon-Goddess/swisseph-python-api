@@ -21,8 +21,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Set ephemeris path
-swe.set_ephe_path('/app/ephe')
+# Set ephemeris path - try multiple locations
+import os
+# First try our custom path, then pyswisseph package data, then let swisseph use defaults
+ephe_paths = [
+    '/app/ephe',
+    os.path.join(os.path.dirname(swe.__file__), 'data'),
+    None  # Let swisseph use its default search paths
+]
+
+for path in ephe_paths:
+    if path and os.path.exists(path):
+        swe.set_ephe_path(path)
+        break
+    elif path is None:
+        # Don't set path, let swisseph use defaults
+        pass
 
 # Constants
 SIGNS = [
@@ -112,14 +126,24 @@ def get_planets(request: ChartRequest):
         result = {}
 
         # Calculate each planet
+        # Asteroids need special handling
+        asteroid_list = ["chiron", "ceres", "pallas", "juno", "vesta"]
+
         for name, planet_id in PLANETS.items():
             try:
-                # Try Swiss Ephemeris first, fall back to Moshier for asteroids
-                try:
+                # Use appropriate ephemeris flag
+                if name in asteroid_list:
+                    # For asteroids, use JPLEPH if available, otherwise MOSEPH
+                    try:
+                        xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_JPLEPH | swe.FLG_SPEED)
+                    except:
+                        try:
+                            xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_MOSEPH | swe.FLG_SPEED)
+                        except:
+                            xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+                else:
+                    # Main planets use Swiss Ephemeris
                     xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
-                except:
-                    # Use Moshier ephemeris for asteroids (built-in, no files needed)
-                    xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_MOSEPH | swe.FLG_SPEED)
 
                 longitude = xx[0]
                 speed = xx[3]
@@ -135,7 +159,9 @@ def get_planets(request: ChartRequest):
                     "isRetro": "true" if speed < 0 else "false"
                 }
             except Exception as e:
+                import traceback
                 print(f"Error calculating {name}: {e}")
+                print(f"Full traceback: {traceback.format_exc()}")
                 continue
 
         return result
