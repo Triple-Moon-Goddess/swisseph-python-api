@@ -155,7 +155,25 @@ def calculate_houses_for_jd(jd: float, lat: float, lon: float, house_system: str
             "degree": round(house_data["degree"], 4)
         }
 
-    return houses_data
+    return houses_data, cusps
+
+def get_planet_house(planet_lon: float, house_cusps) -> int:
+    """Determine which house a planet is in based on its longitude and house cusps"""
+    planet_lon = planet_lon % 360.0
+
+    for i in range(12):
+        cusp_start = house_cusps[i] % 360.0
+        cusp_end = house_cusps[(i + 1) % 12] % 360.0
+
+        # Handle wrap-around at 0/360 degrees
+        if cusp_start < cusp_end:
+            if cusp_start <= planet_lon < cusp_end:
+                return i + 1
+        else:  # Wraps around 0 degrees
+            if planet_lon >= cusp_start or planet_lon < cusp_end:
+                return i + 1
+
+    return 1  # Default to house 1 if not found
 
 # API Endpoints
 @app.get("/")
@@ -229,38 +247,32 @@ def get_houses(request: ChartRequest):
         jd = calculate_julian_day(request.year, request.month, request.day,
                                  request.hour, request.min, request.lat, request.lon)
 
-        # Get house system
-        house_system = HOUSE_SYSTEMS.get(request.house_type, b"P")
+        # Calculate houses (now returns cusps too)
+        houses_data, cusps = calculate_houses_for_jd(jd, request.lat, request.lon, request.house_type)
 
-        # Calculate houses
-        cusps, ascmc = swe.houses(jd, request.lat, request.lon, house_system)
-
+        # Return in the original format
         result = {}
 
         # Add ascendant and midheaven
-        asc_data = lon_to_sign_degree(ascmc[0])
-        mc_data = lon_to_sign_degree(ascmc[1])
-
         result["ascendant"] = {
-            "longitude": ascmc[0],
-            "full_degree": asc_data["full_degree"],
-            **asc_data
+            "longitude": houses_data["ascendant"]["longitude"],
+            "full_degree": houses_data["ascendant"]["longitude"],
+            **houses_data["ascendant"]
         }
 
         result["midheaven"] = {
-            "longitude": ascmc[1],
-            "full_degree": mc_data["full_degree"],
-            **mc_data
+            "longitude": houses_data["midheaven"]["longitude"],
+            "full_degree": houses_data["midheaven"]["longitude"],
+            **houses_data["midheaven"]
         }
 
         # Add all 12 houses
         for i in range(12):
-            house_lon = cusps[i]
-            house_data = lon_to_sign_degree(house_lon)
-            result[f"house{i+1}"] = {
-                "longitude": house_lon,
-                "full_degree": house_data["full_degree"],
-                **house_data
+            house_key = f"house{i+1}"
+            result[house_key] = {
+                "longitude": houses_data[house_key]["longitude"],
+                "full_degree": houses_data[house_key]["longitude"],
+                **houses_data[house_key]
             }
 
         return result
@@ -370,12 +382,12 @@ def get_transits(request: TransitRequest):
     try:
         transits = []
 
-        # Calculate natal houses
+        # Calculate natal houses and get cusps
         natal_jd = calculate_julian_day(
             request.birth_year, request.birth_month, request.birth_day,
             request.birth_hour, request.birth_min, request.lat, request.lon
         )
-        natal_houses = calculate_houses_for_jd(natal_jd, request.lat, request.lon, request.house_type)
+        natal_houses, natal_cusps = calculate_houses_for_jd(natal_jd, request.lat, request.lon, request.house_type)
 
         # Parse dates and convert to Julian Days
         start_dt = datetime.fromisoformat(request.start_date)
@@ -493,8 +505,9 @@ def get_transits(request: TransitRequest):
             transit_sign_data = lon_to_sign_degree(transit_lon)
             natal_sign_data = lon_to_sign_degree(natal_lon_val)
 
-            # Calculate transit houses for this event
-            transit_houses = calculate_houses_for_jd(jd_ut, request.lat, request.lon, request.house_type)
+            # Determine which natal house each planet is in
+            transit_planet_house = get_planet_house(transit_lon, natal_cusps)
+            natal_planet_house = get_planet_house(natal_lon_val, natal_cusps)
 
             result_transits.append({
                 "date": dt.isoformat(),
@@ -508,7 +521,8 @@ def get_transits(request: TransitRequest):
                 "transit_degree": round(transit_sign_data["degree"], 4),
                 "natal_sign": natal_sign_data["sign"],
                 "natal_degree": round(natal_sign_data["degree"], 4),
-                "transit_houses": transit_houses
+                "transit_planet_house": transit_planet_house,
+                "natal_planet_house": natal_planet_house
             })
 
         # Sort by date
@@ -516,8 +530,7 @@ def get_transits(request: TransitRequest):
 
         return {
             "transits": result_transits,
-            "count": len(result_transits),
-            "natal_houses": natal_houses
+            "count": len(result_transits)
         }
 
     except Exception as e:
