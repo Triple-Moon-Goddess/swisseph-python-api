@@ -122,6 +122,41 @@ def calculate_julian_day(year: int, month: int, day: int, hour: int, minute: int
     decimal_hour = hour + minute / 60.0
     return swe.julday(year, month, day, decimal_hour, swe.GREG_CAL)
 
+def calculate_houses_for_jd(jd: float, lat: float, lon: float, house_system: str = "placidus"):
+    """Calculate houses for a given Julian Day and location"""
+    house_sys = HOUSE_SYSTEMS.get(house_system, b"P")
+    cusps, ascmc = swe.houses(jd, lat, lon, house_sys)
+
+    houses_data = {}
+
+    # Add ascendant and midheaven
+    asc_data = lon_to_sign_degree(ascmc[0])
+    mc_data = lon_to_sign_degree(ascmc[1])
+
+    houses_data["ascendant"] = {
+        "longitude": round(ascmc[0], 6),
+        "sign": asc_data["sign"],
+        "degree": round(asc_data["degree"], 4)
+    }
+
+    houses_data["midheaven"] = {
+        "longitude": round(ascmc[1], 6),
+        "sign": mc_data["sign"],
+        "degree": round(mc_data["degree"], 4)
+    }
+
+    # Add all 12 houses
+    for i in range(12):
+        house_lon = cusps[i]
+        house_data = lon_to_sign_degree(house_lon)
+        houses_data[f"house{i+1}"] = {
+            "longitude": round(house_lon, 6),
+            "sign": house_data["sign"],
+            "degree": round(house_data["degree"], 4)
+        }
+
+    return houses_data
+
 # API Endpoints
 @app.get("/")
 def root():
@@ -255,6 +290,13 @@ class TransitRequest(BaseModel):
     end_date: str    # ISO format: "2026-12-17"
     lat: float
     lon: float
+    # Birth data for natal houses
+    birth_year: int
+    birth_month: int
+    birth_day: int
+    birth_hour: int
+    birth_min: int
+    house_type: Optional[str] = "placidus"
     transiting_planets: Optional[List[str]] = ["jupiter", "saturn", "uranus", "neptune", "pluto"]
     aspects: Optional[Dict[str, Dict]] = {
         "Conjunction": {"angle": 0, "orb": 1.0},
@@ -327,6 +369,13 @@ def get_transits(request: TransitRequest):
     """Calculate exact transits using precision algorithms"""
     try:
         transits = []
+
+        # Calculate natal houses
+        natal_jd = calculate_julian_day(
+            request.birth_year, request.birth_month, request.birth_day,
+            request.birth_hour, request.birth_min, request.lat, request.lon
+        )
+        natal_houses = calculate_houses_for_jd(natal_jd, request.lat, request.lon, request.house_type)
 
         # Parse dates and convert to Julian Days
         start_dt = datetime.fromisoformat(request.start_date)
@@ -444,6 +493,9 @@ def get_transits(request: TransitRequest):
             transit_sign_data = lon_to_sign_degree(transit_lon)
             natal_sign_data = lon_to_sign_degree(natal_lon_val)
 
+            # Calculate transit houses for this event
+            transit_houses = calculate_houses_for_jd(jd_ut, request.lat, request.lon, request.house_type)
+
             result_transits.append({
                 "date": dt.isoformat(),
                 "transit_planet": tname,
@@ -455,7 +507,8 @@ def get_transits(request: TransitRequest):
                 "transit_sign": transit_sign_data["sign"],
                 "transit_degree": round(transit_sign_data["degree"], 4),
                 "natal_sign": natal_sign_data["sign"],
-                "natal_degree": round(natal_sign_data["degree"], 4)
+                "natal_degree": round(natal_sign_data["degree"], 4),
+                "transit_houses": transit_houses
             })
 
         # Sort by date
@@ -463,7 +516,8 @@ def get_transits(request: TransitRequest):
 
         return {
             "transits": result_transits,
-            "count": len(result_transits)
+            "count": len(result_transits),
+            "natal_houses": natal_houses
         }
 
     except Exception as e:
