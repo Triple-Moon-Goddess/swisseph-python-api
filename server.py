@@ -126,24 +126,10 @@ def get_planets(request: ChartRequest):
         result = {}
 
         # Calculate each planet
-        # Asteroids need special handling
-        asteroid_list = ["chiron", "ceres", "pallas", "juno", "vesta"]
-
         for name, planet_id in PLANETS.items():
             try:
-                # Use appropriate ephemeris flag
-                if name in asteroid_list:
-                    # For asteroids, use JPLEPH if available, otherwise MOSEPH
-                    try:
-                        xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_JPLEPH | swe.FLG_SPEED)
-                    except:
-                        try:
-                            xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_MOSEPH | swe.FLG_SPEED)
-                        except:
-                            xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
-                else:
-                    # Main planets use Swiss Ephemeris
-                    xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+                # All bodies use Swiss Ephemeris with .se1 files
+                xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
 
                 longitude = xx[0]
                 speed = xx[3]
