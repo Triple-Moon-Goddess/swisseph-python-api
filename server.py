@@ -129,7 +129,9 @@ def get_planets(request: ChartRequest):
         for name, planet_id in PLANETS.items():
             try:
                 # All bodies use Swiss Ephemeris with .se1 files
+                print(f"Calculating {name} (id={planet_id})...")
                 xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+                print(f"  Success: {name} longitude={xx[0]}")
 
                 longitude = xx[0]
                 speed = xx[3]
@@ -146,8 +148,15 @@ def get_planets(request: ChartRequest):
                 }
             except Exception as e:
                 import traceback
-                print(f"Error calculating {name}: {e}")
+                print(f"ERROR calculating {name} (id={planet_id}): {e}")
                 print(f"Full traceback: {traceback.format_exc()}")
+                # Also check if files exist
+                import os
+                print(f"Ephemeris path set to: {swe.get_library_path()}")
+                if name in ["chiron", "ceres", "pallas", "juno", "vesta"]:
+                    ast_dir = "ast0" if name != "chiron" else "ast2"
+                    file_path = f"/app/ephe/{ast_dir}/se{planet_id:05d}.se1"
+                    print(f"  Looking for: {file_path}, exists={os.path.exists(file_path)}")
                 continue
 
         return result
