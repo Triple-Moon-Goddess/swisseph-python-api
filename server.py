@@ -21,22 +21,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Set ephemeris path - try multiple locations
+# Set ephemeris path
 import os
-# First try our custom path, then pyswisseph package data, then let swisseph use defaults
-ephe_paths = [
-    '/app/ephe',
-    os.path.join(os.path.dirname(swe.__file__), 'data'),
-    None  # Let swisseph use its default search paths
-]
 
-for path in ephe_paths:
-    if path and os.path.exists(path):
-        swe.set_ephe_path(path)
-        break
-    elif path is None:
-        # Don't set path, let swisseph use defaults
-        pass
+# Set the ephemeris path to our data directory
+# Swiss Ephemeris uses the SE_EPHE_PATH environment variable
+EPHE_PATH = '/app/ephe'
+if os.path.exists(EPHE_PATH):
+    os.environ['SE_EPHE_PATH'] = EPHE_PATH
+    swe.set_ephe_path(EPHE_PATH)
+    print(f"Ephemeris path set to: {EPHE_PATH}")
+else:
+    # Fallback to pyswisseph package data
+    package_path = os.path.join(os.path.dirname(swe.__file__), 'data')
+    if os.path.exists(package_path):
+        os.environ['SE_EPHE_PATH'] = package_path
+        swe.set_ephe_path(package_path)
+        print(f"Ephemeris path set to: {package_path}")
+    else:
+        print("Warning: No ephemeris path found, using swisseph defaults")
 
 # Constants
 SIGNS = [
