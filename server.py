@@ -439,8 +439,10 @@ def get_transits(request: TransitRequest):
 
             # Get positions
             transit_lon = get_transit_lon(jd_ut, planet_ids[tname])
+            natal_lon_val = request.natal_positions[nname]
+
             transit_sign_data = lon_to_sign_degree(transit_lon)
-            natal_sign_data = lon_to_sign_degree(natal_lon)
+            natal_sign_data = lon_to_sign_degree(natal_lon_val)
 
             result_transits.append({
                 "date": dt.isoformat(),
@@ -449,7 +451,7 @@ def get_transits(request: TransitRequest):
                 "aspect": aspect_name,
                 "separation": round(sep, 6),
                 "transit_longitude": round(transit_lon, 6),
-                "natal_longitude": round(natal_lon, 6),
+                "natal_longitude": round(natal_lon_val, 6),
                 "transit_sign": transit_sign_data["sign"],
                 "transit_degree": round(transit_sign_data["degree"], 4),
                 "natal_sign": natal_sign_data["sign"],
