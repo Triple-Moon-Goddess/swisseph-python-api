@@ -14,11 +14,11 @@ Professional astrology calculations powered by Swiss Ephemeris, delivered throug
 
 ## What This Is
 
-A professional-grade astrology calculation platform that combines:
+A professional-grade astrology calculation REST API powered by Swiss Ephemeris:
 - **Swiss Ephemeris** - Industry-standard astronomical calculations
-- **FastAPI Server** - Your own private calculation API
-- **Google Sheets** - User-friendly interface
-- **Railway Hosting** - Secure cloud deployment
+- **FastAPI Server** - Fast, modern REST API
+- **Self-Hosted** - Deploy your own private instance
+- **Railway Hosting** - Easy cloud deployment (or host anywhere)
 
 ## Features
 
@@ -114,87 +114,61 @@ cd swisseph-python-api
    - Keep this key secure!
    - You'll need it for Google Sheets setup
 
-### Step 4: Setup Google Sheets
+### Step 4: Test Your API
 
-1. **Create New Google Sheet**
-   - Go to sheets.google.com
-   - Create new blank spreadsheet
-   - Name it: "Astrology Charts" (or whatever you like)
+Test that it's working:
 
-2. **Add Scripts**
-   - Click **Extensions → Apps Script**
-   - Delete the default `myFunction()` code
-   - Create first file: Click + next to "Files"
-   - Name: `NatalCharts_SelfHosted.gs`
-   - Copy code from `NatalCharts_SelfHosted.gs` in this repo
-   - Paste into editor
+```bash
+# Test health check (no API key needed)
+curl https://yourapp.up.railway.app/
 
-3. **Add Second Script**
-   - Click + again to add another file
-   - Name: `Transits_SelfHosted_Updated.gs`
-   - Copy code from `Transits_SelfHosted_Updated.gs` in this repo
-   - Paste into editor
+# Test with API key
+curl -X POST https://yourapp.up.railway.app/api/chart \
+  -H "X-API-Key: your-api-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "year": 1967,
+    "month": 4,
+    "day": 17,
+    "hour": 6,
+    "min": 40,
+    "lat": 40.8933,
+    "lon": -73.9714,
+    "house_type": "placidus"
+  }'
+```
 
-4. **Configure Both Scripts**
+You should get JSON back with planetary positions and houses! 🎉
 
-   In `NatalCharts_SelfHosted.gs`, update these lines:
-   ```javascript
-   const CONFIG = {
-     API_BASE_URL: 'https://yourapp.up.railway.app',  // Your Railway URL
-     API_KEY: 'your-generated-key-here',  // Your API key from Step 3
-   ```
+### Step 5: Build Your Client
 
-   In `Transits_SelfHosted_Updated.gs`, update:
-   ```javascript
-   const TRANSIT_CONFIG = {
-     API_BASE_URL: 'https://yourapp.up.railway.app',  // Same Railway URL
-     API_KEY: 'your-generated-key-here',  // Same API key
-   ```
+Now build whatever interface you want:
 
-5. **Save Scripts**
-   - Click "Save" button (disk icon)
-   - Close Apps Script tab
+**Python Script:**
+```python
+import requests
 
-### Step 5: Setup Input Sheet
+def get_chart(year, month, day, hour, min, lat, lon):
+    response = requests.post(
+        'https://yourapp.up.railway.app/api/chart',
+        headers={'X-API-Key': 'your-api-key'},
+        json={
+            'year': year, 'month': month, 'day': day,
+            'hour': hour, 'min': min,
+            'lat': lat, 'lon': lon,
+            'house_type': 'placidus'
+        }
+    )
+    return response.json()
 
-1. Back in Google Sheets, refresh the page
-2. You should see new menu: **"Astrology Charts"**
-3. Click **Astrology Charts → Setup Input Sheet**
-4. This creates "ChartInput" sheet with sample data
+chart = get_chart(1967, 4, 17, 6, 40, 40.8933, -73.9714)
+print(chart)
+```
 
-### Step 6: Test Your Setup
-
-1. **Test API Connection**
-   - Click **Astrology Charts → Test API Connection**
-   - Should see: "✅ API is working!"
-   - If error, check your API_KEY and API_BASE_URL
-
-2. **Calculate Your First Chart**
-   - Go to "ChartInput" sheet
-   - Enter birth data:
-     - name: Your name or code (e.g., "A10001")
-     - year, month, day, hour, minute
-     - city, state, country
-   - Click **Astrology Charts → Process Charts (Placidus)**
-   - New sheet appears with your chart! 🎉
-
-3. **Calculate Transits** (optional)
-   - Click **Astrology Charts → Calculate Transits - Placidus (365 Days)**
-   - New sheet shows year of transits
-   - Takes 30-60 seconds for full year
-
-### Step 7: Start Using It!
-
-**For Each Chart:**
-1. Add row to "ChartInput" sheet
-2. Fill in birth data
-3. Run menu command
-4. Get instant professional chart!
-
-**Batch Processing:**
-- Add multiple rows
-- Run once
-- All charts generated automatically
+**Web App, Mobile App, Google Sheets, Excel VBA, etc.**
+- See [TECHNICAL_DOCUMENTATION.md](TECHNICAL_DOCUMENTATION.md) for API endpoints
+- Build any client you want!
+- The API doesn't care what calls it
 
 ## Troubleshooting
 
@@ -221,40 +195,43 @@ cd swisseph-python-api
 - Check [TECHNICAL_DOCUMENTATION.md](TECHNICAL_DOCUMENTATION.md) for details
 - Open GitHub issue for bugs
 
-## For Your Astrology Teacher
+## Using the API
 
-👋 **Hi! This is set up so Claude can help you!**
+Once deployed, you can call the API from any programming language or tool:
 
-If you get stuck:
-1. Copy any error message
-2. Tell Claude: "I'm setting up the Swiss Ephemeris astrology system and got this error: [paste error]"
-3. Claude will guide you through the fix!
+**Available Endpoints:**
+- `GET /` - Health check
+- `POST /api/planets` - Get planetary positions
+- `POST /api/houses` - Get house cusps
+- `POST /api/chart` - Get complete chart (planets + houses)
+- `POST /api/transits` - Calculate transits
 
-The setup takes about 20-30 minutes. You don't need to know how to code - just follow the steps above and ask Claude if anything is confusing.
+**Authentication:**
+All endpoints require `X-API-Key` header (except health check).
 
-**What you'll need:**
-- Gmail account (for Google Sheets)
-- Credit card for Railway (but free tier is $0/month - they just need it on file)
-- 30 minutes
-- Claude to help! 😊
+**Documentation:**
+See [TECHNICAL_DOCUMENTATION.md](TECHNICAL_DOCUMENTATION.md) for complete API reference with examples.
 
-## Documentation Structure
+## Repository Structure
 
 ```
-swisseph/
+python-api-server/
 ├── README.md (this file)
+├── server.py - FastAPI application
+├── requirements.txt - Python dependencies
+├── Dockerfile - Container config
+├── railway.toml - Railway configuration
+├── ephe/ - Swiss Ephemeris data files
+│
+├── Documentation:
+├── TECHNICAL_DOCUMENTATION.md - Complete API reference
 ├── BUSINESS_DOCUMENTATION.md - Business overview
-├── TECHNICAL_DOCUMENTATION.md - Technical details
+├── AGPL_COMPLIANCE.md - License guide
+├── NO_SUPPORT.md - Support policy
 │
-├── python-api-server/
-│   ├── server.py - FastAPI application
-│   ├── API_KEY_SETUP.md - Security guide
-│   ├── requirements.txt - Python dependencies
-│   ├── Dockerfile - Container config
-│   └── ephe/ - Swiss Ephemeris data files
-│
-├── NatalCharts_SelfHosted.gs - Google Apps Script (natal)
-└── Transits_SelfHosted_Updated.gs - Google Apps Script (transits)
+└── License:
+    ├── LICENSE - AGPL-3.0 full text
+    └── NOTICE - Copyright notices
 ```
 
 ## For Different Audiences
@@ -283,9 +260,10 @@ Start with: [API_KEY_SETUP.md](python-api-server/API_KEY_SETUP.md)
 ## Technology Stack
 
 - **Backend:** Python 3.11, FastAPI, pyswisseph
-- **Frontend:** Google Apps Script, Google Sheets
-- **Hosting:** Railway.app
+- **API:** REST/JSON
+- **Hosting:** Railway.app (or any Docker host)
 - **Data:** Swiss Ephemeris .se1 files
+- **Client:** Build your own (Python, JavaScript, whatever!)
 
 ## Repository
 
