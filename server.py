@@ -1,6 +1,7 @@
 """
 Swiss Ephemeris Python API Server
 Copyright (C) 2025 Triple Moon Goddess Astrology
+Contact: Lisa@triplemoongoddess.com
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by

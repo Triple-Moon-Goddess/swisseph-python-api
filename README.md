@@ -300,7 +300,7 @@ GitHub: https://github.com/TripleMoonGoddess/swisseph-python-api
 - 📖 Check documentation first
 - 🐛 GitHub issues for bugs
 - 💡 GitHub discussions for features
-- 📧 Email for private inquiries
+- 📧 Email: Lisa@triplemoongoddess.com
 
 ## License
 
@@ -311,7 +311,8 @@ See: https://www.astro.com/swisseph/
 
 - **Swiss Ephemeris** by Astrodienst
 - **pyswisseph** by Stanislas Marquis
-- **Created by** Lisa / Triple Moon Goddess
+- **Created by** Lisa - Triple Moon Goddess Astrology
+- **Contact:** Lisa@triplemoongoddess.com
 - **Built with** Claude Code by Anthropic
 
 ## Version

@@ -153,4 +153,8 @@ The code is just a tool - and sharing it actually builds trust with clients who 
 
 ---
 
-**Questions?** This is a general guide. For specific legal questions, consult your privacy attorney boss! 😊
+**Questions?**
+
+Contact: Lisa@triplemoongoddess.com
+
+This is a general guide. For specific legal questions, consult your privacy attorney boss! 😊
