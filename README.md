@@ -4,6 +4,8 @@ Professional astrology calculations powered by Swiss Ephemeris, delivered throug
 
 ## Quick Links
 
+⚠️ **[NO SUPPORT POLICY](NO_SUPPORT.md)** - READ THIS FIRST - No support obligation, you're on your own!
+
 📘 **[Business Documentation](BUSINESS_DOCUMENTATION.md)** - For non-technical users, what this system does and why it's valuable
 
 🔧 **[Technical Documentation](TECHNICAL_DOCUMENTATION.md)** - For developers, complete technical reference and API documentation
@@ -297,10 +299,23 @@ GitHub: https://github.com/TripleMoonGoddess/swisseph-python-api
 
 ## Support
 
-- 📖 Check documentation first
-- 🐛 GitHub issues for bugs
-- 💡 GitHub discussions for features
-- 📧 Email: Lisa@triplemoongoddess.com
+**⚠️ No Support Obligation**
+
+This is open source software provided "AS IS" with NO WARRANTY and NO SUPPORT OBLIGATION.
+
+- 📖 Read the documentation - it's comprehensive
+- 🤖 Use Claude AI to help with setup/troubleshooting
+- 💬 Community support via GitHub discussions (if I choose to participate)
+- 📧 Email: Lisa@triplemoongoddess.com (no guarantee of response)
+
+**I am NOT obligated to:**
+- Answer emails
+- Provide technical support
+- Fix bugs
+- Add features
+- Help with setup
+
+**You're on your own!** That's the deal with free, open source software. Use Claude to help you - that's what it's for! 😊
 
 ## License
 

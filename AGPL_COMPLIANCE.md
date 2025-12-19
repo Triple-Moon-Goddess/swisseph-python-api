@@ -155,6 +155,8 @@ The code is just a tool - and sharing it actually builds trust with clients who 
 
 **Questions?**
 
-Contact: Lisa@triplemoongoddess.com
+Contact: Lisa@triplemoongoddess.com (no guarantee of response)
 
-This is a general guide. For specific legal questions, consult your privacy attorney boss! 😊
+**Note:** This software is provided "AS IS" with no support obligation. I am not required to answer emails, provide support, or help you. That's the deal with free, open source software!
+
+For legal questions, consult your own attorney. This is a general guide only. 😊
