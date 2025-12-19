@@ -56,21 +56,13 @@ async def verify_api_key(api_key: str = Security(api_key_header), request: Reque
     logger.info(f"Successful auth from {client_ip}")
     return api_key
 
-# Restrict CORS to Google domains only
-ALLOWED_ORIGINS = [
-    "https://docs.google.com",
-    "https://script.google.com",
-    "https://accounts.google.com",
-]
-
-# Allow localhost for development
-if os.getenv("ENV") == "development":
-    ALLOWED_ORIGINS.extend(["http://localhost:8000", "http://127.0.0.1:8000"])
-
+# CORS Configuration
+# Google Apps Script makes server-to-server requests and may not send Origin headers
+# Allow all origins but enforce API key authentication for security
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],  # API key authentication provides security
+    allow_credentials=False,  # Not needed for API key auth
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "X-API-Key"],
 )
