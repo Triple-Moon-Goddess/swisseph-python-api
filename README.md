@@ -55,26 +55,186 @@ For full license text, see [LICENSE](LICENSE) file.
 
 ## Quick Start
 
-### 1. Deploy API Server
+### Prerequisites
+- GitHub account (free)
+- Railway account (free tier available)
+- Google account (for Google Sheets)
+- Terminal access (for generating API key)
+
+### Step 1: Fork/Clone This Repository
+
+**Option A: Fork on GitHub (Recommended)**
+1. Click "Fork" button at top of this repository
+2. You now have your own copy!
+
+**Option B: Clone to your machine**
 ```bash
-# Clone and deploy to Railway
-git push origin main
-# Railway auto-deploys in ~3 minutes
+git clone https://github.com/TripleMoonGoddess/swisseph-python-api.git
+cd swisseph-python-api
 ```
 
-### 2. Configure Security
-```bash
-# Generate API key
-openssl rand -hex 32
+### Step 2: Deploy to Railway
 
-# Set in Railway → Variables
-API_KEY=your-generated-key
-```
+1. **Create Railway Account**
+   - Go to https://railway.app
+   - Sign up with GitHub
+   - Free tier: 500 hours/month ($5/month unlimited)
 
-### 3. Setup Google Sheets
-- Add scripts: `NatalCharts_SelfHosted.gs` and `Transits_SelfHosted_Updated.gs`
-- Update `API_KEY` in both scripts
-- Run from menu
+2. **Deploy from GitHub**
+   - Click "New Project"
+   - Select "Deploy from GitHub repo"
+   - Choose your forked repository
+   - Railway auto-detects Python and deploys (~3 minutes)
+
+3. **Get Your API URL**
+   - Click on your service
+   - Go to "Settings" tab
+   - Find "Public Domain" (e.g., `https://yourapp.up.railway.app`)
+   - Copy this URL - you'll need it!
+
+### Step 3: Generate and Configure API Key
+
+1. **Generate Secure Key**
+   ```bash
+   openssl rand -hex 32
+   ```
+   Copy the output (64 characters)
+
+2. **Set in Railway**
+   - In Railway project, click "Variables" tab
+   - Click "New Variable"
+   - Name: `API_KEY`
+   - Value: (paste your generated key)
+   - Click "Add"
+   - Railway will automatically redeploy (~2 minutes)
+
+3. **Save Your Key**
+   - Keep this key secure!
+   - You'll need it for Google Sheets setup
+
+### Step 4: Setup Google Sheets
+
+1. **Create New Google Sheet**
+   - Go to sheets.google.com
+   - Create new blank spreadsheet
+   - Name it: "Astrology Charts" (or whatever you like)
+
+2. **Add Scripts**
+   - Click **Extensions → Apps Script**
+   - Delete the default `myFunction()` code
+   - Create first file: Click + next to "Files"
+   - Name: `NatalCharts_SelfHosted.gs`
+   - Copy code from `NatalCharts_SelfHosted.gs` in this repo
+   - Paste into editor
+
+3. **Add Second Script**
+   - Click + again to add another file
+   - Name: `Transits_SelfHosted_Updated.gs`
+   - Copy code from `Transits_SelfHosted_Updated.gs` in this repo
+   - Paste into editor
+
+4. **Configure Both Scripts**
+
+   In `NatalCharts_SelfHosted.gs`, update these lines:
+   ```javascript
+   const CONFIG = {
+     API_BASE_URL: 'https://yourapp.up.railway.app',  // Your Railway URL
+     API_KEY: 'your-generated-key-here',  // Your API key from Step 3
+   ```
+
+   In `Transits_SelfHosted_Updated.gs`, update:
+   ```javascript
+   const TRANSIT_CONFIG = {
+     API_BASE_URL: 'https://yourapp.up.railway.app',  // Same Railway URL
+     API_KEY: 'your-generated-key-here',  // Same API key
+   ```
+
+5. **Save Scripts**
+   - Click "Save" button (disk icon)
+   - Close Apps Script tab
+
+### Step 5: Setup Input Sheet
+
+1. Back in Google Sheets, refresh the page
+2. You should see new menu: **"Astrology Charts"**
+3. Click **Astrology Charts → Setup Input Sheet**
+4. This creates "ChartInput" sheet with sample data
+
+### Step 6: Test Your Setup
+
+1. **Test API Connection**
+   - Click **Astrology Charts → Test API Connection**
+   - Should see: "✅ API is working!"
+   - If error, check your API_KEY and API_BASE_URL
+
+2. **Calculate Your First Chart**
+   - Go to "ChartInput" sheet
+   - Enter birth data:
+     - name: Your name or code (e.g., "A10001")
+     - year, month, day, hour, minute
+     - city, state, country
+   - Click **Astrology Charts → Process Charts (Placidus)**
+   - New sheet appears with your chart! 🎉
+
+3. **Calculate Transits** (optional)
+   - Click **Astrology Charts → Calculate Transits - Placidus (365 Days)**
+   - New sheet shows year of transits
+   - Takes 30-60 seconds for full year
+
+### Step 7: Start Using It!
+
+**For Each Chart:**
+1. Add row to "ChartInput" sheet
+2. Fill in birth data
+3. Run menu command
+4. Get instant professional chart!
+
+**Batch Processing:**
+- Add multiple rows
+- Run once
+- All charts generated automatically
+
+## Troubleshooting
+
+### ❌ "API key missing" error
+**Fix:** Update API_KEY in both Google Apps Scripts (Step 4.4)
+
+### ❌ "Failed to fetch" error
+**Fix:** Check API_BASE_URL matches your Railway domain exactly
+
+### ❌ Menu doesn't appear
+**Fix:** Refresh Google Sheets after adding scripts
+
+### ❌ "Unknown error" or "Internal Server Error"
+**Fix:**
+1. Wait 2-3 minutes for Railway to finish deploying
+2. Check Railway logs for errors
+3. Verify API_KEY is set in Railway Variables
+
+### ❌ Wrong birth location
+**Fix:** Use full city name, state, country (e.g., "Portland, OR, USA" not just "Portland")
+
+### 💡 Need Help?
+- Your teacher can paste error messages into Claude for help
+- Check [TECHNICAL_DOCUMENTATION.md](TECHNICAL_DOCUMENTATION.md) for details
+- Open GitHub issue for bugs
+
+## For Your Astrology Teacher
+
+👋 **Hi! This is set up so Claude can help you!**
+
+If you get stuck:
+1. Copy any error message
+2. Tell Claude: "I'm setting up the Swiss Ephemeris astrology system and got this error: [paste error]"
+3. Claude will guide you through the fix!
+
+The setup takes about 20-30 minutes. You don't need to know how to code - just follow the steps above and ask Claude if anything is confusing.
+
+**What you'll need:**
+- Gmail account (for Google Sheets)
+- Credit card for Railway (but free tier is $0/month - they just need it on file)
+- 30 minutes
+- Claude to help! 😊
 
 ## Documentation Structure
 
