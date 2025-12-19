@@ -37,6 +37,22 @@ A professional-grade astrology calculation platform that combines:
 - Private server
 - Your data only
 
+## License
+
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+
+**What this means:**
+- ✅ You can use this commercially (charge for astrology services)
+- ✅ You can modify and distribute the code
+- ✅ Source code must remain open and available
+- ✅ Network use requires providing source code access
+
+This software uses **Swiss Ephemeris** by Astrodienst AG, which is also AGPL-3.0 licensed.
+
+For full license text, see [LICENSE](LICENSE) file.
+
+**Commercial Use:** You may charge clients for astrology readings and services using this software. The AGPL requires that you provide access to the source code to anyone using your service over a network.
+
 ## Quick Start
 
 ### 1. Deploy API Server
