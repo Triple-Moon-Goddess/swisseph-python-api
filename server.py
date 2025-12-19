@@ -7,9 +7,6 @@ from fastapi import FastAPI, HTTPException, Security, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, field_validator, ValidationError
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 import swisseph as swe
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
@@ -18,42 +15,29 @@ import pytz
 import os
 import logging
 import hashlib
-from pythonjsonlogger import jsonlogger
 
-# Configure structured logging
-logHandler = logging.StreamHandler()
-formatter = jsonlogger.JsonFormatter(
-    '%(asctime)s %(name)s %(levelname)s %(message)s %(pathname)s %(lineno)d'
-)
-logHandler.setFormatter(formatter)
+# Configure basic logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.addHandler(logHandler)
-logger.setLevel(logging.INFO)
 
-# Rate limiting
-limiter = Limiter(key_func=get_remote_address)
+# Initialize FastAPI
 app = FastAPI(title="Swiss Ephemeris API", version="1.0.0")
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # API Key Security
 API_KEY = os.getenv("API_KEY", "your-secret-key-here")
 API_KEY_HASH = hashlib.sha256(API_KEY.encode()).hexdigest()  # For secure logging
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-async def verify_api_key(api_key: str = Security(api_key_header), request: Request = None):
+async def verify_api_key(api_key: str = Security(api_key_header)):
     """Verify the API key from request header"""
-    client_ip = get_remote_address(request) if request else "unknown"
-
     if api_key is None:
-        logger.warning(f"API key missing from {client_ip}")
+        logger.warning("API key missing")
         raise HTTPException(status_code=403, detail="API key is missing")
 
     if api_key != API_KEY:
-        logger.warning(f"Invalid API key attempt from {client_ip}")
+        logger.warning("Invalid API key attempt")
         raise HTTPException(status_code=403, detail="Invalid API key")
 
-    logger.info(f"Successful auth from {client_ip}")
     return api_key
 
 # CORS Configuration
@@ -78,20 +62,7 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers["Content-Security-Policy"] = "default-src 'self'"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-
-    # Log request
-    logger.info(
-        "Request processed",
-        extra={
-            "method": request.method,
-            "path": request.url.path,
-            "client_ip": get_remote_address(request),
-            "status_code": response.status_code,
-        }
-    )
 
     return response
 
@@ -332,8 +303,7 @@ def root():
     }
 
 @app.post("/api/planets")
-@limiter.limit("100/minute")
-def get_planets(request: ChartRequest, fastapi_request: Request, api_key: str = Security(verify_api_key)):
+def get_planets(request: ChartRequest, api_key: str = Security(verify_api_key)):
     """Get planetary positions"""
     logger.info(f"Planets calculation requested for {request.year}-{request.month}-{request.day}")
     try:
@@ -383,8 +353,7 @@ def get_planets(request: ChartRequest, fastapi_request: Request, api_key: str = 
         raise HTTPException(status_code=500, detail=f"Error calculating planets: {str(e)}")
 
 @app.post("/api/houses")
-@limiter.limit("100/minute")
-def get_houses(request: ChartRequest, fastapi_request: Request, api_key: str = Security(verify_api_key)):
+def get_houses(request: ChartRequest, api_key: str = Security(verify_api_key)):
     """Get house cusps"""
     logger.info(f"Houses calculation requested for {request.year}-{request.month}-{request.day}")
     try:
@@ -426,8 +395,7 @@ def get_houses(request: ChartRequest, fastapi_request: Request, api_key: str = S
         raise HTTPException(status_code=500, detail=f"Error calculating houses: {str(e)}")
 
 @app.post("/api/chart")
-@limiter.limit("100/minute")
-def get_chart(request: ChartRequest, fastapi_request: Request, api_key: str = Security(verify_api_key)):
+def get_chart(request: ChartRequest, api_key: str = Security(verify_api_key)):
     """Get complete chart data (planets + houses)"""
     logger.info(f"Complete chart requested for {request.year}-{request.month}-{request.day}")
     try:
@@ -643,8 +611,7 @@ def find_min_sep_jd(j1: float, j2: float, natal_lon: float, planet_id: int) -> f
     return (a + b) / 2.0
 
 @app.post("/api/transits")
-@limiter.limit("20/minute")  # Lower limit for expensive transit calculations
-def get_transits(request: TransitRequest, fastapi_request: Request, api_key: str = Security(verify_api_key)):
+def get_transits(request: TransitRequest, api_key: str = Security(verify_api_key)):
     """Calculate exact transits using precision algorithms"""
     logger.info(f"Transit calculation requested: {request.start_date} to {request.end_date}")
     try:
