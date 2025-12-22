@@ -666,9 +666,9 @@ def get_transits(request: TransitRequest, api_key: str = Security(verify_api_key
             "Quincunx": 0.004
         }
 
-        # Step sizes (optimized for speed while maintaining precision)
-        STEP_CONJ = 0.2  # Days (was 0.05)
-        STEP_OTHER = 0.4  # Days (was 0.1)
+        # Step sizes (matching transits_runner.py for maximum precision)
+        STEP_CONJ = 0.05  # Days
+        STEP_OTHER = 0.1  # Days
 
         # For each transiting planet
         for transit_planet_name in request.transiting_planets:
