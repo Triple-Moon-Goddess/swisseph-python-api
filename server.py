@@ -207,6 +207,36 @@ class ChartRequest(BaseModel):
         return v
 
 # Helper functions
+
+# Stationary thresholds in degrees/day - planets moving slower than this are considered stationary
+# Values based on typical apparent motion at station points
+STATIONARY_THRESHOLDS = {
+    "sun": 0.0,       # Sun never stations
+    "moon": 0.0,      # Moon never stations
+    "mercury": 0.08,  # ~0.08°/day or less at station
+    "venus": 0.06,    # ~0.06°/day or less at station
+    "mars": 0.03,     # ~0.03°/day or less at station
+    "jupiter": 0.015, # ~0.015°/day or less at station
+    "saturn": 0.008,  # ~0.008°/day or less at station
+    "uranus": 0.004,  # ~0.004°/day or less at station
+    "neptune": 0.002, # ~0.002°/day or less at station
+    "pluto": 0.002,   # ~0.002°/day or less at station
+    "chiron": 0.01,   # Estimated
+    "north_node": 0.0,  # Nodes don't station the same way
+    "south_node": 0.0,
+}
+
+def is_stationary(planet_name: str, speed: float) -> bool:
+    """
+    Determine if a planet is stationary based on its speed.
+    A planet is stationary when its apparent motion is near zero,
+    typically just before or after turning retrograde/direct.
+    """
+    threshold = STATIONARY_THRESHOLDS.get(planet_name.lower(), 0.02)
+    if threshold == 0.0:
+        return False  # Sun, Moon, and nodes don't station
+    return abs(speed) < threshold
+
 def lon_to_sign_degree(lon: float):
     """Convert longitude to sign and degree"""
     lon = lon % 360.0
@@ -350,7 +380,8 @@ def get_planets(request: ChartRequest, api_key: str = Security(verify_api_key)):
                     "sign": sign_data["sign"],
                     "degree": sign_data["degree"],
                     "speed": speed,
-                    "isRetro": "true" if speed < 0 else "false"
+                    "isRetro": "true" if speed < 0 else "false",
+                    "isStationary": "true" if is_stationary(name, speed) else "false"
                 }
             except Exception as e:
                 import traceback
@@ -437,7 +468,8 @@ def get_chart(request: ChartRequest, api_key: str = Security(verify_api_key)):
                     "sign": sign_data["sign"],
                     "degree": sign_data["degree"],
                     "speed": speed,
-                    "isRetro": "true" if speed < 0 else "false"
+                    "isRetro": "true" if speed < 0 else "false",
+                    "isStationary": "true" if is_stationary(name, speed) else "false"
                 }
             except:
                 continue
