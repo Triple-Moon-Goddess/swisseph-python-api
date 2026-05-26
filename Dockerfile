@@ -14,8 +14,9 @@ COPY ephe/ /app/ephe/
 COPY server.py .
 COPY download_asteroids.py .
 
-# Expose port
+# Expose port (Cloud Run will set PORT env var, default to 8000 for local dev)
 EXPOSE 8000
 
 # Download asteroid files on startup, then run server
-CMD python3 download_asteroids.py && uvicorn server:app --host 0.0.0.0 --port 8000
+# Use PORT env var (Cloud Run standard) or default to 8000
+CMD python3 download_asteroids.py && uvicorn server:app --host 0.0.0.0 --port ${PORT:-8000}
