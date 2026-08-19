@@ -799,6 +799,10 @@ def get_transits(request: TransitRequest, api_key: str = Security(verify_api_key
             transit_lon = xx_t[0]
             transit_speed = xx_t[3]
             natal_lon_val = request.natal_positions[nname]
+            # Moon + Sun at the exact moment — feeds the TMG Moon check-in
+            # (phase from elongation, sign, natal house) with no extra calls.
+            xx_moon, _ = swe.calc_ut(jd_ut, swe.MOON, swe.FLG_SWIEPH)
+            xx_sun, _ = swe.calc_ut(jd_ut, swe.SUN, swe.FLG_SWIEPH)
 
             transit_sign_data = lon_to_sign_degree(transit_lon)
             natal_sign_data = lon_to_sign_degree(natal_lon_val)
@@ -829,7 +833,9 @@ def get_transits(request: TransitRequest, api_key: str = Security(verify_api_key
                 "transit_planet_ws_house": transit_planet_ws_house,
                 "natal_planet_ws_house": natal_planet_ws_house,
                 "speed": round(transit_speed, 6),
-                "is_retro": transit_speed < 0
+                "is_retro": transit_speed < 0,
+                "moon_lon": round(xx_moon[0], 6),
+                "sun_lon": round(xx_sun[0], 6)
             })
 
         # Sort by date
