@@ -27,6 +27,7 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, field_validator, ValidationError
 import swisseph as swe
 from datetime import datetime, timedelta
+from functools import lru_cache
 from typing import Optional, List, Dict
 from timezonefinder import TimezoneFinder
 import pytz
@@ -607,8 +608,15 @@ def angle_separation(lon1: float, lon2: float) -> float:
     diff = abs((lon1 - lon2) % 360)
     return diff if diff <= 180 else 360 - diff
 
+@lru_cache(maxsize=262144)
 def get_transit_lon(jd: float, planet_id: int) -> float:
-    """Get transit planet longitude at Julian Day"""
+    """Get transit planet longitude at Julian Day.
+
+    Cached: the transit scan walks an identical JD sequence once per natal
+    position and aspect, so without the cache each planet's ephemeris is
+    recomputed ~50x per step. Cache keys are exact float reuses, so hits are
+    bit-identical — results are unchanged, only repeated work is skipped.
+    """
     xx, _ = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
     return xx[0]
 
@@ -681,8 +689,11 @@ def get_transits(request: TransitRequest, api_key: str = Security(verify_api_key
         start_jd = swe.julday(start_dt.year, start_dt.month, start_dt.day, 0.0, swe.GREG_CAL)
         end_jd = swe.julday(end_dt.year, end_dt.month, end_dt.day, 0.0, swe.GREG_CAL)
 
-        # Planet IDs
+        # Planet IDs. The Moon is included for short-window daily scans
+        # (TMG daily Moon reading) — callers keep long-window scans to the
+        # slow planets, since the Moon perfects dozens of contacts per month.
         planet_ids = {
+            "moon": swe.MOON,
             "jupiter": swe.JUPITER,
             "saturn": swe.SATURN,
             "uranus": swe.URANUS,
@@ -783,8 +794,10 @@ def get_transits(request: TransitRequest, api_key: str = Security(verify_api_key
             S = int((((fh - H) * 60) - M) * 60)
             dt = datetime(y, m, d, H, M, S)
 
-            # Get positions
-            transit_lon = get_transit_lon(jd_ut, planet_ids[tname])
+            # Get positions (with speed, for motion-at-exactness)
+            xx_t, _ = swe.calc_ut(jd_ut, planet_ids[tname], swe.FLG_SWIEPH | swe.FLG_SPEED)
+            transit_lon = xx_t[0]
+            transit_speed = xx_t[3]
             natal_lon_val = request.natal_positions[nname]
 
             transit_sign_data = lon_to_sign_degree(transit_lon)
@@ -814,7 +827,9 @@ def get_transits(request: TransitRequest, api_key: str = Security(verify_api_key
                 "transit_planet_house": transit_planet_house,
                 "natal_planet_house": natal_planet_house,
                 "transit_planet_ws_house": transit_planet_ws_house,
-                "natal_planet_ws_house": natal_planet_ws_house
+                "natal_planet_ws_house": natal_planet_ws_house,
+                "speed": round(transit_speed, 6),
+                "is_retro": transit_speed < 0
             })
 
         # Sort by date
@@ -827,6 +842,108 @@ def get_transits(request: TransitRequest, api_key: str = Security(verify_api_key
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error calculating transits: {str(e)}")
+
+# ── Stations ──────────────────────────────────────────────────────────────────
+# Exact station events (retrograde/direct turns) for the slow planets over a
+# window. Feeds TMG transit-sequence detection (station-between rule) and
+# station-in-orb report call-outs.
+
+STATION_PLANET_IDS = {
+    "mercury": swe.MERCURY,
+    "venus": swe.VENUS,
+    "mars": swe.MARS,
+    "jupiter": swe.JUPITER,
+    "saturn": swe.SATURN,
+    "uranus": swe.URANUS,
+    "neptune": swe.NEPTUNE,
+    "pluto": swe.PLUTO,
+}
+
+class StationsRequest(BaseModel):
+    bodies: List[str] = ["jupiter", "saturn", "uranus", "neptune", "pluto"]
+    start_date: str
+    end_date: str
+
+    @field_validator('start_date', 'end_date')
+    @classmethod
+    def validate_station_dates(cls, v):
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError('Date must be ISO format YYYY-MM-DD')
+        return v
+
+    @field_validator('bodies')
+    @classmethod
+    def validate_station_bodies(cls, v):
+        unknown = [b for b in v if b not in STATION_PLANET_IDS]
+        if unknown:
+            raise ValueError(f"Bodies that station are {sorted(STATION_PLANET_IDS)}; unknown: {unknown}")
+        return v
+
+def get_transit_speed(jd: float, planet_id: int) -> float:
+    """Apparent daily motion in longitude at Julian Day"""
+    xx, _ = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+    return xx[3]
+
+def bisect_station(j1: float, j2: float, planet_id: int, tol: float = 1e-4) -> float:
+    """Find the speed zero-crossing (station moment) by bisection"""
+    f1 = get_transit_speed(j1, planet_id)
+    a, b = j1, j2
+    for _ in range(60):
+        if (b - a) < tol:
+            break
+        m = (a + b) / 2.0
+        fm = get_transit_speed(m, planet_id)
+        if f1 * fm <= 0:
+            b = m
+        else:
+            a = m
+            f1 = fm
+    return (a + b) / 2.0
+
+@app.post("/api/stations")
+def get_stations(request: StationsRequest, api_key: str = Security(verify_api_key)):
+    """Exact station events (retrograde/direct turns) over a date window"""
+    logger.info(f"Station scan requested: {request.start_date} to {request.end_date}")
+    try:
+        start_dt = datetime.fromisoformat(request.start_date)
+        end_dt = datetime.fromisoformat(request.end_date)
+        start_jd = swe.julday(start_dt.year, start_dt.month, start_dt.day, 0.0, swe.GREG_CAL)
+        end_jd = swe.julday(end_dt.year, end_dt.month, end_dt.day, 0.0, swe.GREG_CAL)
+
+        STEP_DAYS = 1.0  # slow-planet speed changes sign over weeks; daily scan cannot skip a turn
+        stations = []
+        for body in request.bodies:
+            planet_id = STATION_PLANET_IDS[body]
+            jd = start_jd
+            prev_speed = get_transit_speed(jd, planet_id)
+            while jd < end_jd:
+                jd_next = min(jd + STEP_DAYS, end_jd)
+                speed = get_transit_speed(jd_next, planet_id)
+                if prev_speed * speed <= 0.0 and prev_speed != speed:
+                    jd_station = bisect_station(jd, jd_next, planet_id)
+                    y, m, d, fh = swe.revjul(jd_station, swe.GREG_CAL)
+                    H = int(fh)
+                    M = int((fh - H) * 60)
+                    S = int((((fh - H) * 60) - M) * 60)
+                    lon_data = lon_to_sign_degree(get_transit_lon(jd_station, planet_id))
+                    stations.append({
+                        "body": body,
+                        "date": datetime(y, m, d, H, M, S).isoformat(),
+                        "jd": round(jd_station, 6),
+                        "longitude": round(get_transit_lon(jd_station, planet_id), 6),
+                        "sign": lon_data["sign"],
+                        "degree": round(lon_data["degree"], 4),
+                        "type": "direct" if prev_speed < 0 else "retrograde"
+                    })
+                prev_speed = speed
+                jd = jd_next
+
+        stations.sort(key=lambda s: s["jd"])
+        return {"stations": stations, "count": len(stations)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating stations: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
