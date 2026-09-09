@@ -692,8 +692,16 @@ def get_transits(request: TransitRequest, api_key: str = Security(verify_api_key
         # Planet IDs. The Moon is included for short-window daily scans
         # (TMG daily Moon reading) — callers keep long-window scans to the
         # slow planets, since the Moon perfects dozens of contacts per month.
+        # Sun/Mercury/Venus/Mars added for the workbook transit journal, which
+        # scans all ten transiting bodies over its two-year span; the scan
+        # algorithm below is body-agnostic (step sizes already suit the Moon,
+        # the fastest body).
         planet_ids = {
+            "sun": swe.SUN,
             "moon": swe.MOON,
+            "mercury": swe.MERCURY,
+            "venus": swe.VENUS,
+            "mars": swe.MARS,
             "jupiter": swe.JUPITER,
             "saturn": swe.SATURN,
             "uranus": swe.URANUS,
@@ -950,6 +958,168 @@ def get_stations(request: StationsRequest, api_key: str = Security(verify_api_ke
         return {"stations": stations, "count": len(stations)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error calculating stations: {str(e)}")
+
+INGRESS_PLANET_IDS = {
+    "sun": swe.SUN,
+    "moon": swe.MOON,
+    "mercury": swe.MERCURY,
+    "venus": swe.VENUS,
+    "mars": swe.MARS,
+    "jupiter": swe.JUPITER,
+    "saturn": swe.SATURN,
+    "uranus": swe.URANUS,
+    "neptune": swe.NEPTUNE,
+    "pluto": swe.PLUTO,
+}
+
+# Scan step per body, in days. The step only needs to be small enough that a
+# body cannot cross two sign boundaries (30 deg) or revisit one unseen inside a
+# single step; crossings themselves are refined by bisection to ~30 seconds.
+INGRESS_STEP_DAYS = {
+    "sun": 0.25, "moon": 0.1, "mercury": 0.25, "venus": 0.25, "mars": 0.25,
+    "jupiter": 0.5, "saturn": 0.5, "uranus": 0.5, "neptune": 0.5, "pluto": 0.5,
+}
+
+class IngressRequest(BaseModel):
+    start_date: str  # ISO format: "2026-09-09"
+    end_date: str
+    bodies: List[str] = list(INGRESS_PLANET_IDS.keys())
+    # Birth data for natal house cusps (same contract as /api/transits)
+    lat: float
+    lon: float
+    birth_year: int
+    birth_month: int
+    birth_day: int
+    birth_hour: int
+    birth_min: int
+    house_type: Optional[str] = "placidus"
+
+    @field_validator('start_date', 'end_date')
+    @classmethod
+    def validate_ingress_dates(cls, v):
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError('Date must be ISO format YYYY-MM-DD')
+        return v
+
+    @field_validator('bodies')
+    @classmethod
+    def validate_ingress_bodies(cls, v):
+        unknown = [b for b in v if b not in INGRESS_PLANET_IDS]
+        if unknown:
+            raise ValueError(f"Known bodies are {sorted(INGRESS_PLANET_IDS)}; unknown: {unknown}")
+        return v
+
+
+def jd_to_iso(jd: float) -> str:
+    y, m, d, fh = swe.revjul(jd, swe.GREG_CAL)
+    H = int(fh)
+    M = int((fh - H) * 60)
+    S = int((((fh - H) * 60) - M) * 60)
+    return datetime(y, m, d, H, M, S).isoformat()
+
+
+def bisect_classification(j1: float, j2: float, classify, tol: float = 3.5e-4) -> float:
+    """Refine the moment a classification (sign index / house number) flips
+    between j1 and j2. Pure comparison bisection — no longitude-boundary root
+    needed, so it is immune to the 0/360 wrap and to retrograde direction.
+    tol 3.5e-4 days ~= 30 seconds."""
+    c1 = classify(j1)
+    while (j2 - j1) > tol:
+        m = (j1 + j2) / 2.0
+        if classify(m) == c1:
+            j1 = m
+        else:
+            j2 = m
+    return (j1 + j2) / 2.0
+
+
+@app.post("/api/ingresses")
+def get_ingresses(request: IngressRequest, api_key: str = Security(verify_api_key)):
+    """Sign ingresses and natal-house-cusp crossings for transiting bodies over
+    a date window, plus each body's position at window start and the natal
+    cusps. Built for the TMG workbook transit journal: its entries pre-fill
+    'moves from Sign X to Sign Y' and 'affects natal House(s) N' from these
+    events. Retrograde crossings are reported with their actual direction."""
+    logger.info(f"Ingress scan requested: {request.start_date} to {request.end_date} for {request.bodies}")
+    try:
+        # Natal Placidus cusps from birth data — identical path to /api/transits.
+        natal_jd = calculate_julian_day(
+            request.birth_year, request.birth_month, request.birth_day,
+            request.birth_hour, request.birth_min, request.lat, request.lon
+        )
+        _, natal_cusps = calculate_houses_for_jd(natal_jd, request.lat, request.lon, request.house_type)
+
+        start_dt = datetime.fromisoformat(request.start_date)
+        end_dt = datetime.fromisoformat(request.end_date)
+        start_jd = swe.julday(start_dt.year, start_dt.month, start_dt.day, 0.0, swe.GREG_CAL)
+        end_jd = swe.julday(end_dt.year, end_dt.month, end_dt.day, 0.0, swe.GREG_CAL)
+        if end_jd <= start_jd:
+            raise HTTPException(status_code=422, detail="end_date must be after start_date")
+
+        def sign_of(jd: float, pid: int) -> int:
+            return int((get_transit_lon(jd, pid) % 360.0) // 30)
+
+        def house_of(jd: float, pid: int) -> int:
+            return get_planet_house(get_transit_lon(jd, pid), natal_cusps)
+
+        events = []
+        positions = {}
+        for body in request.bodies:
+            pid = INGRESS_PLANET_IDS[body]
+            step = INGRESS_STEP_DAYS[body]
+
+            lon0 = get_transit_lon(start_jd, pid)
+            sign_data = lon_to_sign_degree(lon0)
+            positions[body] = {
+                "lon": round(lon0, 6),
+                "sign": sign_data["sign"],
+                "degree": round(sign_data["degree"], 4),
+                "house": get_planet_house(lon0, natal_cusps),
+                "retrograde": get_transit_speed(start_jd, pid) < 0,
+            }
+
+            jd = start_jd
+            prev_sign = sign_of(jd, pid)
+            prev_house = house_of(jd, pid)
+            while jd < end_jd:
+                jd_next = min(jd + step, end_jd)
+                curr_sign = sign_of(jd_next, pid)
+                curr_house = house_of(jd_next, pid)
+
+                if curr_sign != prev_sign:
+                    jd_x = bisect_classification(jd, jd_next, lambda j: sign_of(j, pid))
+                    events.append({
+                        "body": body, "type": "sign",
+                        "date": jd_to_iso(jd_x), "jd": round(jd_x, 6),
+                        "from": SIGNS[prev_sign], "to": SIGNS[curr_sign],
+                        "retrograde": get_transit_speed(jd_x, pid) < 0,
+                    })
+                if curr_house != prev_house:
+                    jd_x = bisect_classification(jd, jd_next, lambda j: house_of(j, pid))
+                    events.append({
+                        "body": body, "type": "house",
+                        "date": jd_to_iso(jd_x), "jd": round(jd_x, 6),
+                        "from": prev_house, "to": curr_house,
+                        "retrograde": get_transit_speed(jd_x, pid) < 0,
+                    })
+
+                prev_sign, prev_house = curr_sign, curr_house
+                jd = jd_next
+
+        events.sort(key=lambda e: e["jd"])
+        return {
+            "positions": positions,
+            "cusps": [round(c % 360.0, 6) for c in natal_cusps[:12]],
+            "events": events,
+            "count": len(events),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating ingresses: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn
