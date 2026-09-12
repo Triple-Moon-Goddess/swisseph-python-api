@@ -1121,6 +1121,140 @@ def get_ingresses(request: IngressRequest, api_key: str = Security(verify_api_ke
         raise HTTPException(status_code=500, detail=f"Error calculating ingresses: {str(e)}")
 
 
+class OrbWindowsRequest(BaseModel):
+    start_date: str  # ISO format: "2026-09-01"
+    end_date: str
+    bodies: List[str] = list(INGRESS_PLANET_IDS.keys())
+    natal_positions: Dict[str, float]  # e.g. {"Sun": 26.57, "ASC": 109.35, ...}
+    aspects: Dict[str, Dict]  # e.g. {"Conjunct": {"angle": 0, "orb": 8.0}, ...}
+
+    @field_validator('start_date', 'end_date')
+    @classmethod
+    def validate_orb_window_dates(cls, v):
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError('Date must be ISO format YYYY-MM-DD')
+        return v
+
+    @field_validator('bodies')
+    @classmethod
+    def validate_orb_window_bodies(cls, v):
+        unknown = [b for b in v if b not in INGRESS_PLANET_IDS]
+        if unknown:
+            raise ValueError(f"Known bodies are {sorted(INGRESS_PLANET_IDS)}; unknown: {unknown}")
+        return v
+
+    @field_validator('natal_positions')
+    @classmethod
+    def validate_orb_window_natal(cls, v):
+        if not v:
+            raise ValueError('Natal positions cannot be empty')
+        for point, lon in v.items():
+            if lon < 0 or lon > 360:
+                raise ValueError(f'{point} longitude must be between 0 and 360')
+        return v
+
+    @field_validator('aspects')
+    @classmethod
+    def validate_orb_window_aspects(cls, v):
+        if not v:
+            raise ValueError('Aspects cannot be empty')
+        for name, spec in v.items():
+            angle = spec.get("angle")
+            orb = spec.get("orb")
+            if angle is None or angle < 0 or angle > 180:
+                raise ValueError(f'{name}: angle must be between 0 and 180')
+            if orb is None or orb <= 0 or orb > 15:
+                raise ValueError(f'{name}: orb must be between 0 and 15')
+        return v
+
+
+@app.post("/api/orb-windows")
+def get_orb_windows(request: OrbWindowsRequest, api_key: str = Security(verify_api_key)):
+    """In-orb windows (enter/exit instants) for transiting bodies against natal
+    positions, per aspect. Built for the TMG daily transit journal: each daily
+    aspect line shows the date range it is active, i.e. while
+    |separation - aspect angle| <= orb. Windows already open at start_date or
+    still open at end_date are clamped and flagged. Edges are refined by the
+    same comparison bisection as /api/ingresses (~30 s), which is immune to the
+    0/360 wrap, the 180 deg separation maximum, and retrograde direction."""
+    logger.info(f"Orb-window scan requested: {request.start_date} to {request.end_date} for {request.bodies}")
+    try:
+        start_dt = datetime.fromisoformat(request.start_date)
+        end_dt = datetime.fromisoformat(request.end_date)
+        start_jd = swe.julday(start_dt.year, start_dt.month, start_dt.day, 0.0, swe.GREG_CAL)
+        end_jd = swe.julday(end_dt.year, end_dt.month, end_dt.day, 0.0, swe.GREG_CAL)
+        if end_jd <= start_jd:
+            raise HTTPException(status_code=422, detail="end_date must be after start_date")
+
+        windows = []
+        for body in request.bodies:
+            pid = INGRESS_PLANET_IDS[body]
+            step = INGRESS_STEP_DAYS[body]
+
+            # One pass per body over the JD walk; every (natal point, aspect)
+            # tracks its own open window. The ephemeris longitude per JD is
+            # memoised (get_transit_lon), so the inner loops are float math.
+            trackers = []
+            for natal_point, natal_lon in request.natal_positions.items():
+                for aspect_name, spec in request.aspects.items():
+                    trackers.append({
+                        "natal": natal_point, "natal_lon": natal_lon,
+                        "aspect": aspect_name,
+                        "angle": float(spec["angle"]), "orb": float(spec["orb"]),
+                        "open_jd": None, "open_clamped": False,
+                    })
+
+            def in_orb(jd: float, tr) -> bool:
+                sep = angle_separation(get_transit_lon(jd, pid), tr["natal_lon"])
+                return abs(sep - tr["angle"]) <= tr["orb"]
+
+            for tr in trackers:
+                if in_orb(start_jd, tr):
+                    tr["open_jd"] = start_jd
+                    tr["open_clamped"] = True
+
+            jd = start_jd
+            while jd < end_jd:
+                jd_next = min(jd + step, end_jd)
+                for tr in trackers:
+                    inside = in_orb(jd_next, tr)
+                    was_inside = tr["open_jd"] is not None
+                    if inside == was_inside:
+                        continue
+                    jd_x = bisect_classification(jd, jd_next, lambda j: in_orb(j, tr))
+                    if inside:
+                        tr["open_jd"] = jd_x
+                        tr["open_clamped"] = False
+                    else:
+                        windows.append({
+                            "body": body, "natal": tr["natal"], "aspect": tr["aspect"],
+                            "enter": jd_to_iso(tr["open_jd"]), "exit": jd_to_iso(jd_x),
+                            "enter_jd": round(tr["open_jd"], 6), "exit_jd": round(jd_x, 6),
+                            "enter_clamped": tr["open_clamped"], "exit_clamped": False,
+                        })
+                        tr["open_jd"] = None
+                        tr["open_clamped"] = False
+                jd = jd_next
+
+            for tr in trackers:
+                if tr["open_jd"] is not None:
+                    windows.append({
+                        "body": body, "natal": tr["natal"], "aspect": tr["aspect"],
+                        "enter": jd_to_iso(tr["open_jd"]), "exit": jd_to_iso(end_jd),
+                        "enter_jd": round(tr["open_jd"], 6), "exit_jd": round(end_jd, 6),
+                        "enter_clamped": tr["open_clamped"], "exit_clamped": True,
+                    })
+
+        windows.sort(key=lambda w: w["enter_jd"])
+        return {"windows": windows, "count": len(windows)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating orb windows: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
