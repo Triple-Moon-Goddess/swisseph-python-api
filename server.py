@@ -1255,6 +1255,59 @@ def get_orb_windows(request: OrbWindowsRequest, api_key: str = Security(verify_a
         raise HTTPException(status_code=500, detail=f"Error calculating orb windows: {str(e)}")
 
 
+class LongitudesRequest(BaseModel):
+    instants: List[str]  # ISO datetimes, UT: "2026-09-13T19:00:00"
+    bodies: List[str] = list(INGRESS_PLANET_IDS.keys())
+
+    @field_validator('instants')
+    @classmethod
+    def validate_longitude_instants(cls, v):
+        if not v:
+            raise ValueError('instants cannot be empty')
+        if len(v) > 400:
+            raise ValueError('At most 400 instants per request')
+        for instant in v:
+            try:
+                datetime.fromisoformat(instant)
+            except ValueError:
+                raise ValueError(f'Instant must be ISO format YYYY-MM-DDTHH:MM:SS, got: {instant}')
+        return v
+
+    @field_validator('bodies')
+    @classmethod
+    def validate_longitude_bodies(cls, v):
+        unknown = [b for b in v if b not in INGRESS_PLANET_IDS]
+        if unknown:
+            raise ValueError(f"Known bodies are {sorted(INGRESS_PLANET_IDS)}; unknown: {unknown}")
+        return v
+
+
+@app.post("/api/longitudes")
+def get_longitudes(request: LongitudesRequest, api_key: str = Security(verify_api_key)):
+    """Ecliptic longitudes for transiting bodies at a list of UT instants.
+
+    Built for the TMG daily transit journal: the month calendar stores each
+    body's longitude at local noon per day, so the client can derive the
+    current orb of an aspect window (|separation - aspect angle|) as pure
+    arithmetic on service-computed positions — no ephemeris math in JS."""
+    logger.info(f"Longitudes requested for {len(request.instants)} instants, bodies {request.bodies}")
+    try:
+        longitudes = {}
+        for instant in request.instants:
+            dt = datetime.fromisoformat(instant)
+            jd = swe.julday(dt.year, dt.month, dt.day,
+                            dt.hour + dt.minute / 60.0 + dt.second / 3600.0, swe.GREG_CAL)
+            longitudes[instant] = {
+                body: round(get_transit_lon(jd, INGRESS_PLANET_IDS[body]) % 360.0, 6)
+                for body in request.bodies
+            }
+        return {"longitudes": longitudes, "count": len(longitudes)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating longitudes: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -98,6 +98,23 @@ def main():
               str(hits[0].get("date", hits[0]))[:10] in ("2026-09-22", "2026-09-23"),
               str(hits[0])[:200])
 
+    print("== /api/longitudes: noon positions for the daily-orb derivation ==")
+    lreq = server.LongitudesRequest(
+        instants=["2026-09-22T19:00:00", "2026-03-20T15:00:00"],
+        bodies=["sun", "moon"],
+    )
+    lout = server.get_longitudes(lreq, api_key="local")
+    check("one entry per instant", len(lout["longitudes"]) == 2, str(lout["count"]))
+    equinox_sun = lout["longitudes"]["2026-09-22T19:00:00"]["sun"]
+    check("Sun just shy of 180.0 five hours before the 2026 Libra ingress (00:05 UT Sep 23)",
+          179.7 < equinox_sun < 180.0, f"sun={equinox_sun}")
+    march_sun = lout["longitudes"]["2026-03-20T15:00:00"]["sun"]
+    check("Sun ~0.0/360 near the 2026 Aries ingress (equinox ~14:46 UT)",
+          march_sun < 0.2 or march_sun > 359.8, f"sun={march_sun}")
+    for instant, by_body in lout["longitudes"].items():
+        for body, lon in by_body.items():
+            check(f"{body}@{instant} in [0,360)", 0 <= lon < 360, str(lon))
+
     print()
     if failures:
         print(f"FAILURES: {failures}")
