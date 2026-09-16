@@ -1308,6 +1308,362 @@ def get_longitudes(request: LongitudesRequest, api_key: str = Security(verify_ap
         raise HTTPException(status_code=500, detail=f"Error calculating longitudes: {str(e)}")
 
 
+# ── Planetary returns ─────────────────────────────────────────────────────────
+# The current return cycle of each transiting body against its own natal
+# longitude, plus the charts the TMG Planetary Returns report is drawn from:
+# the return chart (cycle-start instant, birth location) and the transit chart
+# (same instant, the seeker's current location — same longitudes, different
+# house wheel, which the report expresses intentionally), plus the exact
+# perfection instants of the body's aspects to its own natal position through
+# the cycle. All house math stays here; the app only pairs longitudes.
+
+# Geocentric return periods in days — search-horizon sizing only, never output.
+# Mercury and Venus never stray far from the Sun, so their geocentric return
+# period is the solar year, not their heliocentric orbital period.
+RETURN_PERIOD_DAYS = {
+    "sun": 365.26, "moon": 27.322, "mercury": 365.26, "venus": 365.26,
+    "mars": 686.98, "jupiter": 4332.6, "saturn": 10759.2,
+    "uranus": 30688.5, "neptune": 60182.0, "pluto": 90560.0,
+}
+
+# Walk step per body, in days. Small enough that a retrograde loop is sampled
+# many times over (the shortest, Mercury's, spans ~24 days), so no crossing
+# pair can hide inside one step; crossings are then bisected to ~1 second.
+RETURN_STEP_DAYS = {
+    "sun": 0.5, "moon": 0.25, "mercury": 0.25, "venus": 0.25, "mars": 0.5,
+    "jupiter": 1.0, "saturn": 2.0, "uranus": 3.0, "neptune": 5.0, "pluto": 5.0,
+}
+
+# How far around the anchor the crossing search reaches, in periods. One full
+# period back guarantees the previous return exists wherever the birth floor
+# does not cut it off; the margin absorbs retrograde-driven cycle stretch.
+RETURN_SEARCH_PERIODS = 1.35
+
+RETURN_SELF_ASPECTS_DEFAULT = {
+    "Square": 90.0, "Sextile": 60.0, "Trine": 120.0, "Opposition": 180.0,
+}
+
+# Bodies placed on the return/transit charts: the ten planets plus the True
+# Node (the report's North Node; South is its antipode, derived by the app).
+RETURN_CHART_BODY_IDS = dict(INGRESS_PLANET_IDS, true_node=swe.TRUE_NODE)
+
+
+class ReturnsRequest(BaseModel):
+    # UT instant the cycle is anchored on ('YYYY-MM-DDTHH:MM:SS').
+    anchor_instant: str
+    bodies: List[str] = list(INGRESS_PLANET_IDS.keys())
+    natal_positions: Dict[str, float]  # body → natal ecliptic longitude
+    # Birth data — local civil time + birth location (natal-chart contract,
+    # identical to /api/transits and /api/ingresses).
+    lat: float
+    lon: float
+    birth_year: int
+    birth_month: int
+    birth_day: int
+    birth_hour: int
+    birth_min: int
+    # Where the seeker is now — the transit chart's house wheel.
+    current_lat: float
+    current_lon: float
+    house_type: Optional[str] = "placidus"
+    self_aspects: Optional[Dict[str, float]] = None
+
+    @field_validator('anchor_instant')
+    @classmethod
+    def validate_anchor_instant(cls, v):
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError('anchor_instant must be an ISO datetime (YYYY-MM-DDTHH:MM:SS)')
+        return v
+
+    @field_validator('bodies')
+    @classmethod
+    def validate_returns_bodies(cls, v):
+        unknown = [b for b in v if b not in INGRESS_PLANET_IDS]
+        if unknown:
+            raise ValueError(f"Known bodies are {sorted(INGRESS_PLANET_IDS)}; unknown: {unknown}")
+        if not v:
+            raise ValueError('bodies cannot be empty')
+        return v
+
+    @field_validator('natal_positions')
+    @classmethod
+    def validate_returns_natal(cls, v):
+        for body, lon in v.items():
+            if lon < 0 or lon > 360:
+                raise ValueError(f'{body} longitude must be between 0 and 360')
+        return v
+
+    @field_validator('lat', 'current_lat')
+    @classmethod
+    def validate_returns_lat(cls, v):
+        if v < -90 or v > 90:
+            raise ValueError('Latitude must be between -90 and 90')
+        return v
+
+    @field_validator('lon', 'current_lon')
+    @classmethod
+    def validate_returns_lon(cls, v):
+        if v < -180 or v > 180:
+            raise ValueError('Longitude must be between -180 and 180')
+        return v
+
+    @field_validator('self_aspects')
+    @classmethod
+    def validate_returns_self_aspects(cls, v):
+        if v is None:
+            return v
+        for name, angle in v.items():
+            if angle <= 0 or angle > 180:
+                raise ValueError(f'self-aspect {name} angle must be in (0, 180]')
+        return v
+
+
+def wrap180(x: float) -> float:
+    """Signed angular offset in [-180, 180)."""
+    return ((x + 180.0) % 360.0) - 180.0
+
+
+def signed_offset(jd: float, planet_id: int, target_lon: float) -> float:
+    return wrap180(get_transit_lon(jd, planet_id) - target_lon)
+
+
+def bisect_signed_crossing(j1: float, j2: float, planet_id: int, target_lon: float,
+                           tol: float = 1e-5) -> float:
+    """Refine a signed zero-crossing of (body longitude − target) bracketed by
+    [j1, j2]. The bracket never spans the antipode (callers reject wrap jumps),
+    so the offset is continuous and plain bisection converges. tol 1e-5 days
+    ~= 1 second."""
+    f1 = signed_offset(j1, planet_id, target_lon)
+    a, b = j1, j2
+    for _ in range(60):
+        m = (a + b) / 2.0
+        fm = signed_offset(m, planet_id, target_lon)
+        if abs(fm) < 1e-7 or (b - a) < tol:
+            return m
+        if f1 * fm <= 0:
+            b = m
+        else:
+            a = m
+            f1 = fm
+    return (a + b) / 2.0
+
+
+def find_return_crossings(planet_id: int, target_lon: float,
+                          start_jd: float, end_jd: float, step: float) -> list:
+    """Every instant the body's longitude crosses target_lon in [start, end],
+    in either direction (a retrograde pass yields its full crossing sequence).
+    Sign-change detection on the wrapped offset; a jump through the antipode
+    (|f1 − f2| > 180) is the wrap artifact, not a crossing, and is skipped."""
+    crossings = []
+    jd = start_jd
+    f1 = signed_offset(jd, planet_id, target_lon)
+    while jd < end_jd:
+        jd2 = min(jd + step, end_jd)
+        f2 = signed_offset(jd2, planet_id, target_lon)
+        if abs(f1 - f2) < 180.0 and f1 * f2 <= 0.0 and (f1 != 0.0 or f2 != 0.0):
+            root = bisect_signed_crossing(jd, jd2, planet_id, target_lon)
+            if not crossings or abs(root - crossings[-1]) > 1e-3:
+                crossings.append(root)
+        jd, f1 = jd2, f2
+    return crossings
+
+
+def find_self_aspect_hits(planet_id: int, natal_lon: float, angle: float,
+                          start_jd: float, end_jd: float, step: float) -> list:
+    """Exact perfection instants of one aspect angle between the transiting
+    body and its own natal longitude, inside [start, end]. Angles below 180°
+    are sign-changes of (separation − angle), refined by the shared bisection;
+    180° is the separation's maximum, so oppositions are ternary-refined local
+    maxima that actually reach it (mirrors the conjunction-minimum handling
+    in /api/transits)."""
+    hits = []
+    if angle >= 180.0:
+        prev_jd = start_jd
+        prev_sep = sep_func(prev_jd, natal_lon, planet_id)
+        curr_jd = min(prev_jd + step, end_jd)
+        curr_sep = sep_func(curr_jd, natal_lon, planet_id)
+        jd = curr_jd + step
+        while jd <= end_jd:
+            next_sep = sep_func(jd, natal_lon, planet_id)
+            if prev_sep < curr_sep > next_sep:
+                jd_max = find_max_sep_jd(prev_jd, jd, natal_lon, planet_id)
+                if abs(sep_func(jd_max, natal_lon, planet_id) - 180.0) < 0.01:
+                    if not hits or abs(jd_max - hits[-1]) > 1e-3:
+                        hits.append(jd_max)
+            prev_jd, prev_sep = curr_jd, curr_sep
+            curr_jd, curr_sep = jd, next_sep
+            jd += step
+        return hits
+
+    jd = start_jd
+    f1 = gfunc(jd, natal_lon, planet_id, angle)
+    while jd < end_jd:
+        jd2 = min(jd + step, end_jd)
+        f2 = gfunc(jd2, natal_lon, planet_id, angle)
+        root = None
+        if f1 == 0.0:
+            root = jd
+        elif f2 == 0.0:
+            root = jd2
+        elif f1 * f2 < 0.0:
+            root = bisect_root(jd, jd2, natal_lon, planet_id, angle)
+        if root is not None and (not hits or abs(root - hits[-1]) > 1e-3):
+            hits.append(root)
+        jd, f1 = jd2, f2
+    return hits
+
+
+def find_max_sep_jd(j1: float, j2: float, natal_lon: float, planet_id: int) -> float:
+    """Local maximum separation via ternary search (opposition perfection)."""
+    a, b = j1, j2
+    for _ in range(40):
+        m1 = a + (b - a) / 3.0
+        m2 = b - (b - a) / 3.0
+        if sep_func(m1, natal_lon, planet_id) > sep_func(m2, natal_lon, planet_id):
+            b = m2
+        else:
+            a = m1
+    return (a + b) / 2.0
+
+
+def returns_body_state(jd: float, planet_id: int):
+    """(longitude, speed) at a JD, with speed for retrograde/applying checks."""
+    xx, _ = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
+    return xx[0] % 360.0, xx[3]
+
+
+def returns_placement(lon: float, speed: float, wheels: dict) -> dict:
+    """One body's placement: sign/degree plus its house in every named wheel
+    ('house' key per wheel, e.g. return_house / transit_house / natal_house)."""
+    sign_data = lon_to_sign_degree(lon)
+    placement = {
+        "longitude": round(lon, 6),
+        "sign": sign_data["sign"],
+        "degree": round(sign_data["degree"], 4),
+        "speed": round(speed, 6),
+        "is_retro": speed < 0,
+    }
+    for wheel_name, cusps in wheels.items():
+        placement[f"{wheel_name}_house"] = get_planet_house(lon, cusps)
+    return placement
+
+
+def returns_angles(houses_data: dict, natal_cusps) -> dict:
+    """Ascendant + Midheaven of one wheel, each with the natal house its
+    longitude falls in (their own-wheel houses are 1 and 10 by definition,
+    so the natal placement is the informative one)."""
+    return {
+        key: {
+            **houses_data[key],
+            "natal_house": get_planet_house(houses_data[key]["longitude"], natal_cusps),
+        }
+        for key in ("ascendant", "midheaven")
+    }
+
+
+@app.post("/api/returns")
+def get_returns(request: ReturnsRequest, api_key: str = Security(verify_api_key)):
+    """Per body: the current return cycle around anchor_instant (previous and
+    next exact conjunctions with the natal longitude — the cycle start clamps
+    to birth when the first return has not happened yet), the return chart at
+    cycle start (birth location) and the transit house wheel at the same
+    instant (current location), and the exact self-aspect perfections through
+    the cycle, each placed on the day-one transit wheel."""
+    logger.info(f"Returns requested for {request.bodies} around {request.anchor_instant}")
+    try:
+        anchor_dt = datetime.fromisoformat(request.anchor_instant)
+        anchor_jd = swe.julday(
+            anchor_dt.year, anchor_dt.month, anchor_dt.day,
+            anchor_dt.hour + anchor_dt.minute / 60.0 + anchor_dt.second / 3600.0,
+            swe.GREG_CAL,
+        )
+        birth_jd = calculate_julian_day(
+            request.birth_year, request.birth_month, request.birth_day,
+            request.birth_hour, request.birth_min, request.lat, request.lon,
+        )
+        if anchor_jd < birth_jd:
+            raise HTTPException(status_code=422, detail="anchor_instant is before the birth instant")
+
+        missing = [b for b in request.bodies if b not in request.natal_positions]
+        if missing:
+            raise HTTPException(status_code=422, detail=f"natal_positions missing bodies: {missing}")
+
+        _, natal_cusps = calculate_houses_for_jd(birth_jd, request.lat, request.lon, request.house_type)
+        self_aspects = request.self_aspects or RETURN_SELF_ASPECTS_DEFAULT
+
+        returns = {}
+        for body in request.bodies:
+            planet_id = INGRESS_PLANET_IDS[body]
+            target_lon = request.natal_positions[body] % 360.0
+            period = RETURN_PERIOD_DAYS[body]
+            step = RETURN_STEP_DAYS[body]
+
+            search_start = max(birth_jd, anchor_jd - RETURN_SEARCH_PERIODS * period)
+            search_end = anchor_jd + RETURN_SEARCH_PERIODS * period
+            crossings = find_return_crossings(planet_id, target_lon, search_start, search_end, step)
+
+            prev_hits = [jd for jd in crossings if jd <= anchor_jd]
+            next_hits = [jd for jd in crossings if jd > anchor_jd]
+            clamped_to_birth = len(prev_hits) == 0
+            cycle_start_jd = prev_hits[-1] if prev_hits else birth_jd
+            cycle_end_jd = next_hits[0] if next_hits else None
+
+            return_houses, return_cusps = calculate_houses_for_jd(
+                cycle_start_jd, request.lat, request.lon, request.house_type)
+            transit_houses, transit_cusps = calculate_houses_for_jd(
+                cycle_start_jd, request.current_lat, request.current_lon, request.house_type)
+
+            wheels = {
+                "return": return_cusps,
+                "transit": transit_cusps,
+                "natal": natal_cusps,
+            }
+            planets = {}
+            for chart_body, chart_pid in RETURN_CHART_BODY_IDS.items():
+                lon, speed = returns_body_state(cycle_start_jd, chart_pid)
+                planets[chart_body] = returns_placement(lon, speed, wheels)
+
+            aspect_hits = []
+            if cycle_end_jd is not None:
+                for aspect_name, angle in self_aspects.items():
+                    for hit_jd in find_self_aspect_hits(
+                            planet_id, target_lon, angle, cycle_start_jd, cycle_end_jd, step):
+                        lon, speed = returns_body_state(hit_jd, planet_id)
+                        sign_data = lon_to_sign_degree(lon)
+                        aspect_hits.append({
+                            "aspect": aspect_name,
+                            "date": jd_to_iso(hit_jd),
+                            "longitude": round(lon, 6),
+                            "sign": sign_data["sign"],
+                            "degree": round(sign_data["degree"], 4),
+                            "transit_house": get_planet_house(lon, transit_cusps),
+                            "natal_house": get_planet_house(lon, natal_cusps),
+                            "is_retro": speed < 0,
+                        })
+                aspect_hits.sort(key=lambda h: h["date"])
+
+            returns[body] = {
+                "cycle": {
+                    "start": jd_to_iso(cycle_start_jd),
+                    "end": jd_to_iso(cycle_end_jd) if cycle_end_jd is not None else None,
+                    "clamped_to_birth": clamped_to_birth,
+                    "end_found": cycle_end_jd is not None,
+                },
+                "planets": planets,
+                "return_angles": returns_angles(return_houses, natal_cusps),
+                "transit_angles": returns_angles(transit_houses, natal_cusps),
+                "self_aspects": aspect_hits,
+            }
+
+        return {"anchor_instant": request.anchor_instant, "returns": returns}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating returns: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
