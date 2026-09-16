@@ -1624,6 +1624,12 @@ def get_returns(request: ReturnsRequest, api_key: str = Security(verify_api_key)
             for chart_body, chart_pid in RETURN_CHART_BODY_IDS.items():
                 lon, speed = returns_body_state(cycle_start_jd, chart_pid)
                 planets[chart_body] = returns_placement(lon, speed, wheels)
+            # South Node: the True Node's antipode, placed on every wheel by
+            # its own longitude (quadrant houses are not symmetric, so the
+            # antipode's house is a real cusp lookup, not "house + 6").
+            node = planets["true_node"]
+            planets["south_node"] = returns_placement(
+                (node["longitude"] + 180.0) % 360.0, node["speed"], wheels)
 
             aspect_hits = []
             if cycle_end_jd is not None:
