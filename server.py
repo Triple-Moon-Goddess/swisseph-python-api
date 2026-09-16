@@ -1450,19 +1450,37 @@ def bisect_signed_crossing(j1: float, j2: float, planet_id: int, target_lon: flo
     return (a + b) / 2.0
 
 
+# A crossing only counts as a RETURN once the body has genuinely departed its
+# natal degree. Newborn charts start ON the degree, and every body wobbles
+# back across it during its first retrograde loop (Saturn ~10 months after
+# birth) — a one-year-old is not having a Saturn return. 30° exceeds every
+# retrograde-loop amplitude (Mars' ~19° is the widest), and a true return
+# approaches from a full revolution, so no real return is ever gated out.
+RETURN_DEPARTURE_DEG = 30.0
+
+
 def find_return_crossings(planet_id: int, target_lon: float,
-                          start_jd: float, end_jd: float, step: float) -> list:
-    """Every instant the body's longitude crosses target_lon in [start, end],
-    in either direction (a retrograde pass yields its full crossing sequence).
-    Sign-change detection on the wrapped offset; a jump through the antipode
-    (|f1 − f2| > 180) is the wrap artifact, not a crossing, and is skipped."""
+                          start_jd: float, end_jd: float, step: float,
+                          departed: bool = True) -> list:
+    """Every RETURN instant — the body's longitude crossing target_lon — in
+    [start, end], in either direction (a retrograde return still yields its
+    full multi-pass sequence). Sign-change detection on the wrapped offset; a
+    jump through the antipode (|f1 − f2| > 180) is the wrap artifact, not a
+    crossing, and is skipped.
+
+    With departed=False (a scan that starts at the birth instant), crossings
+    are ignored until the body has first moved RETURN_DEPARTURE_DEG away from
+    target_lon — the post-natal retrograde re-crossings of the natal degree
+    are natal wobble, not returns."""
     crossings = []
     jd = start_jd
     f1 = signed_offset(jd, planet_id, target_lon)
     while jd < end_jd:
         jd2 = min(jd + step, end_jd)
         f2 = signed_offset(jd2, planet_id, target_lon)
-        if abs(f1 - f2) < 180.0 and f1 * f2 <= 0.0 and (f1 != 0.0 or f2 != 0.0):
+        if not departed and min(abs(f1), abs(f2)) >= RETURN_DEPARTURE_DEG:
+            departed = True
+        if departed and abs(f1 - f2) < 180.0 and f1 * f2 <= 0.0 and (f1 != 0.0 or f2 != 0.0):
             root = bisect_signed_crossing(jd, jd2, planet_id, target_lon)
             if not crossings or abs(root - crossings[-1]) > 1e-3:
                 crossings.append(root)
@@ -1602,7 +1620,11 @@ def get_returns(request: ReturnsRequest, api_key: str = Security(verify_api_key)
 
             search_start = max(birth_jd, anchor_jd - RETURN_SEARCH_PERIODS * period)
             search_end = anchor_jd + RETURN_SEARCH_PERIODS * period
-            crossings = find_return_crossings(planet_id, target_lon, search_start, search_end, step)
+            # A scan floored at birth starts ON the natal degree — apply the
+            # departure gate so post-natal wobble never counts as a return. A
+            # scan starting mid-flight is already a full revolution in.
+            crossings = find_return_crossings(planet_id, target_lon, search_start, search_end, step,
+                                              departed=search_start > birth_jd)
 
             prev_hits = [jd for jd in crossings if jd <= anchor_jd]
             next_hits = [jd for jd in crossings if jd > anchor_jd]
