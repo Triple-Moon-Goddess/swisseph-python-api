@@ -34,6 +34,7 @@ import pytz
 import os
 import logging
 import hashlib
+import hmac
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
@@ -42,18 +43,28 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI
 app = FastAPI(title="Swiss Ephemeris API", version="1.0.0")
 
-# API Key Security
-API_KEY = os.getenv("API_KEY", "your-secret-key-here")
-API_KEY_HASH = hashlib.sha256(API_KEY.encode()).hexdigest()  # For secure logging
+# API Key Security (transitional)
+#
+# Callers authenticate to this service with a Google-signed OIDC identity token
+# (audience = this service's URL) that Cloud Run's IAM front door verifies before
+# a request reaches this process. The static X-API-Key below is the legacy
+# second check kept only until `allUsers` is removed from the service's invoker
+# policy; it is then deleted along with the SWISS_EPH_API_KEY secret.
+#
+# There is deliberately NO default value: a deployment without API_KEY must fail
+# at startup rather than silently accept a well-known placeholder key.
+API_KEY = os.getenv("API_KEY")
+if not API_KEY:
+    raise RuntimeError("API_KEY environment variable is not set — refusing to start with no credential.")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def verify_api_key(api_key: str = Security(api_key_header)):
-    """Verify the API key from request header"""
+    """Verify the API key from request header (constant-time compare)."""
     if api_key is None:
         logger.warning("API key missing")
         raise HTTPException(status_code=403, detail="API key is missing")
 
-    if api_key != API_KEY:
+    if not hmac.compare_digest(api_key.encode("utf-8"), API_KEY.encode("utf-8")):
         logger.warning("Invalid API key attempt")
         raise HTTPException(status_code=403, detail="Invalid API key")
 
