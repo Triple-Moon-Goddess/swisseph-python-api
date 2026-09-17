@@ -1692,6 +1692,161 @@ def get_returns(request: ReturnsRequest, api_key: str = Security(verify_api_key)
         raise HTTPException(status_code=500, detail=f"Error calculating returns: {str(e)}")
 
 
+# ── Monthly transit report ───────────────────────────────────────────────────
+# Chart-free sky events after an instant: the next new and full moon, and the
+# next sign ingress of each requested body. Built for the TMG Monthly Transit
+# Report (admin Astrology Reports tab): one row per event, coloured by the
+# sign's element. No natal data — everything here is mundane astronomy.
+
+MONTHLY_DEFAULT_BODIES = ["sun", "mercury", "venus", "mars"]
+
+# Scan step for the Sun–Moon elongation, in days. The phase half-cycle is
+# ~14.8 days, so a 0.25-day step cannot skip a lunation; instants are then
+# bisected to ~30 seconds.
+LUNATION_STEP_DAYS = 0.25
+# Longer than any synodic month (29.27–29.83 days).
+LUNATION_HORIZON_DAYS = 32.0
+# Longer than any body's longest stay in one sign (Mars' retrograde loop can
+# hold it in a sign for ~7 months; Venus ~4; Mercury ~2.5).
+INGRESS_HORIZON_DAYS = 400.0
+
+
+class MonthlyTransitsRequest(BaseModel):
+    # UT instant the search begins at ('YYYY-MM-DDTHH:MM:SS'); every event
+    # returned is strictly after it.
+    start_instant: str
+    bodies: List[str] = list(MONTHLY_DEFAULT_BODIES)
+
+    @field_validator('start_instant')
+    @classmethod
+    def validate_monthly_start(cls, v):
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError('start_instant must be an ISO datetime (YYYY-MM-DDTHH:MM:SS)')
+        return v
+
+    @field_validator('bodies')
+    @classmethod
+    def validate_monthly_bodies(cls, v):
+        unknown = [b for b in v if b not in INGRESS_PLANET_IDS]
+        if unknown:
+            raise ValueError(f"Known bodies are {sorted(INGRESS_PLANET_IDS)}; unknown: {unknown}")
+        if not v:
+            raise ValueError('bodies cannot be empty')
+        return v
+
+
+def lunar_phase_half(jd: float) -> int:
+    """0 while the Moon is waxing (elongation from the Sun in [0, 180)),
+    1 while waning. A 1→0 flip is a new moon, a 0→1 flip a full moon."""
+    elongation = (get_transit_lon(jd, swe.MOON) - get_transit_lon(jd, swe.SUN)) % 360.0
+    return int(elongation // 180.0)
+
+
+def lunation_event(jd: float) -> dict:
+    sun = lon_to_sign_degree(get_transit_lon(jd, swe.SUN))
+    moon = lon_to_sign_degree(get_transit_lon(jd, swe.MOON))
+    return {
+        "date": jd_to_iso(jd), "jd": round(jd, 6),
+        "sun_sign": sun["sign"], "sun_degree": round(sun["degree"], 4),
+        "moon_sign": moon["sign"], "moon_degree": round(moon["degree"], 4),
+    }
+
+
+def find_next_lunations(start_jd: float) -> dict:
+    """The first new moon and first full moon strictly after start_jd."""
+    found = {"new_moon": None, "full_moon": None}
+    jd = start_jd
+    prev = lunar_phase_half(jd)
+    end_jd = start_jd + LUNATION_HORIZON_DAYS
+    while jd < end_jd and (found["new_moon"] is None or found["full_moon"] is None):
+        jd_next = min(jd + LUNATION_STEP_DAYS, end_jd)
+        curr = lunar_phase_half(jd_next)
+        if curr != prev:
+            jd_x = bisect_classification(jd, jd_next, lunar_phase_half)
+            key = "new_moon" if curr == 0 else "full_moon"
+            if found[key] is None:
+                found[key] = lunation_event(jd_x)
+        prev = curr
+        jd = jd_next
+    return found
+
+
+def find_next_ingress(start_jd: float, body: str) -> Optional[dict]:
+    """The first sign boundary crossing of a body strictly after start_jd, in
+    whichever direction it is moving (a retrograde re-entry counts — it is
+    reported with its direction)."""
+    pid = INGRESS_PLANET_IDS[body]
+    step = INGRESS_STEP_DAYS[body]
+
+    def sign_of(jd: float) -> int:
+        return int((get_transit_lon(jd, pid) % 360.0) // 30)
+
+    jd = start_jd
+    prev_sign = sign_of(jd)
+    end_jd = start_jd + INGRESS_HORIZON_DAYS
+    while jd < end_jd:
+        jd_next = min(jd + step, end_jd)
+        curr_sign = sign_of(jd_next)
+        if curr_sign != prev_sign:
+            jd_x = bisect_classification(jd, jd_next, sign_of)
+            return {
+                "date": jd_to_iso(jd_x), "jd": round(jd_x, 6),
+                "from": SIGNS[prev_sign], "to": SIGNS[curr_sign],
+                "retrograde": get_transit_speed(jd_x, pid) < 0,
+            }
+        prev_sign = curr_sign
+        jd = jd_next
+    return None
+
+
+@app.post("/api/monthly-transits")
+def get_monthly_transits(request: MonthlyTransitsRequest, api_key: str = Security(verify_api_key)):
+    """Chart-free sky events after start_instant: the next new moon and full
+    moon (with the Sun's and Moon's signs at the instant) and, per requested
+    body, its sign at the start and its next sign ingress (either direction).
+    Everything is strictly after the start instant."""
+    logger.info(f"Monthly transits requested after {request.start_instant} for {request.bodies}")
+    try:
+        start_dt = datetime.fromisoformat(request.start_instant)
+        start_jd = swe.julday(
+            start_dt.year, start_dt.month, start_dt.day,
+            start_dt.hour + start_dt.minute / 60.0 + start_dt.second / 3600.0,
+            swe.GREG_CAL,
+        )
+        lunations = find_next_lunations(start_jd)
+        missing = [k for k, v in lunations.items() if v is None]
+        if missing:
+            raise HTTPException(status_code=500, detail=f"No {missing} found within {LUNATION_HORIZON_DAYS} days")
+
+        positions = {}
+        ingresses = {}
+        for body in request.bodies:
+            lon0 = get_transit_lon(start_jd, INGRESS_PLANET_IDS[body])
+            sign_data = lon_to_sign_degree(lon0)
+            positions[body] = {
+                "sign": sign_data["sign"],
+                "degree": round(sign_data["degree"], 4),
+                "retrograde": get_transit_speed(start_jd, INGRESS_PLANET_IDS[body]) < 0,
+            }
+            ingress = find_next_ingress(start_jd, body)
+            if ingress is None:
+                raise HTTPException(status_code=500, detail=f"No {body} ingress found within {INGRESS_HORIZON_DAYS} days")
+            ingresses[body] = ingress
+
+        return {
+            "start_instant": request.start_instant,
+            "lunations": lunations,
+            "positions": positions,
+            "ingresses": ingresses,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating monthly transits: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -23,6 +23,12 @@ docker run -p 8000:8000 -e API_KEY=your-key swisseph-api
 - `POST /api/houses` - House cusps
 - `POST /api/chart` - Complete chart
 - `POST /api/transits` - Transit calculations
+- `POST /api/stations` - Retrograde/direct stations
+- `POST /api/ingresses` - Sign + natal-house ingresses over a window
+- `POST /api/orb-windows` - In-orb windows against natal points
+- `POST /api/longitudes` - Longitudes at UT instants
+- `POST /api/returns` - Planetary return cycles + return/transit charts
+- `POST /api/monthly-transits` - Next new/full moon + next sign ingress per body (chart-free)
 
 All endpoints require `X-API-Key` header (except health check).
 
