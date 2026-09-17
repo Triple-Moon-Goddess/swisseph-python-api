@@ -1353,13 +1353,30 @@ RETURN_SELF_ASPECTS_DEFAULT = {
 RETURN_CHART_BODY_IDS = dict(INGRESS_PLANET_IDS, true_node=swe.TRUE_NODE)
 
 
-class ReturnsRequest(BaseModel):
-    # UT instant the cycle is anchored on ('YYYY-MM-DDTHH:MM:SS').
-    anchor_instant: str
-    bodies: List[str] = list(INGRESS_PLANET_IDS.keys())
-    natal_positions: Dict[str, float]  # body → natal ecliptic longitude
-    # Birth data — local civil time + birth location (natal-chart contract,
-    # identical to /api/transits and /api/ingresses).
+def validate_longitude_map(v: Dict[str, float]) -> Dict[str, float]:
+    """A body → ecliptic longitude map, every value in [0, 360]."""
+    for body, lon in v.items():
+        if lon < 0 or lon > 360:
+            raise ValueError(f'{body} longitude must be between 0 and 360')
+    return v
+
+
+def validate_latitude(v: float) -> float:
+    if v < -90 or v > 90:
+        raise ValueError('Latitude must be between -90 and 90')
+    return v
+
+
+def validate_longitude(v: float) -> float:
+    if v < -180 or v > 180:
+        raise ValueError('Longitude must be between -180 and 180')
+    return v
+
+
+class NatalChartRequest(BaseModel):
+    """Birth data — local civil time + birth location (the natal-chart
+    contract, identical to /api/transits and /api/ingresses). Every
+    chart-based report request inherits these fields and their checks."""
     lat: float
     lon: float
     birth_year: int
@@ -1367,10 +1384,27 @@ class ReturnsRequest(BaseModel):
     birth_day: int
     birth_hour: int
     birth_min: int
+    house_type: Optional[str] = "placidus"
+
+    @field_validator('lat')
+    @classmethod
+    def validate_natal_lat(cls, v):
+        return validate_latitude(v)
+
+    @field_validator('lon')
+    @classmethod
+    def validate_natal_lon(cls, v):
+        return validate_longitude(v)
+
+
+class ReturnsRequest(NatalChartRequest):
+    # UT instant the cycle is anchored on ('YYYY-MM-DDTHH:MM:SS').
+    anchor_instant: str
+    bodies: List[str] = list(INGRESS_PLANET_IDS.keys())
+    natal_positions: Dict[str, float]  # body → natal ecliptic longitude
     # Where the seeker is now — the transit chart's house wheel.
     current_lat: float
     current_lon: float
-    house_type: Optional[str] = "placidus"
     self_aspects: Optional[Dict[str, float]] = None
 
     @field_validator('anchor_instant')
@@ -1395,24 +1429,17 @@ class ReturnsRequest(BaseModel):
     @field_validator('natal_positions')
     @classmethod
     def validate_returns_natal(cls, v):
-        for body, lon in v.items():
-            if lon < 0 or lon > 360:
-                raise ValueError(f'{body} longitude must be between 0 and 360')
-        return v
+        return validate_longitude_map(v)
 
-    @field_validator('lat', 'current_lat')
+    @field_validator('current_lat')
     @classmethod
-    def validate_returns_lat(cls, v):
-        if v < -90 or v > 90:
-            raise ValueError('Latitude must be between -90 and 90')
-        return v
+    def validate_returns_current_lat(cls, v):
+        return validate_latitude(v)
 
-    @field_validator('lon', 'current_lon')
+    @field_validator('current_lon')
     @classmethod
-    def validate_returns_lon(cls, v):
-        if v < -180 or v > 180:
-            raise ValueError('Longitude must be between -180 and 180')
-        return v
+    def validate_returns_current_lon(cls, v):
+        return validate_longitude(v)
 
     @field_validator('self_aspects')
     @classmethod
@@ -1876,23 +1903,15 @@ ANNUAL_STATION_PAD_DAYS = 200.0
 ANNUAL_INGRESS_HORIZON_DAYS = 35.0 * 365.25
 
 
-class AnnualTransitsRequest(BaseModel):
+class AnnualTransitsRequest(NatalChartRequest):
     # UT instant the report year begins at ('YYYY-MM-DDTHH:MM:SS').
     start_instant: str
     span_days: int = 365
     # Natal longitudes the transiting Sun is searched against, keyed by
     # ANNUAL_SUN_TARGET_KEYS (the app passes the stored chart's values so the
-    # report agrees with the chart on screen).
+    # report agrees with the chart on screen). Birth data for the natal house
+    # cusps comes from NatalChartRequest (same contract as /api/returns).
     sun_targets: Dict[str, float]
-    # Birth data for the natal house cusps (same contract as /api/returns).
-    lat: float
-    lon: float
-    birth_year: int
-    birth_month: int
-    birth_day: int
-    birth_hour: int
-    birth_min: int
-    house_type: Optional[str] = "placidus"
     retro_bodies: List[str] = list(ANNUAL_RETRO_BODIES)
     ingress_bodies: List[str] = list(ANNUAL_INGRESS_BODIES)
 
@@ -1939,19 +1958,6 @@ class AnnualTransitsRequest(BaseModel):
             raise ValueError(f"Known bodies are {sorted(INGRESS_PLANET_IDS)}; unknown: {unknown}")
         return v
 
-    @field_validator('lat')
-    @classmethod
-    def validate_annual_lat(cls, v):
-        if v < -90 or v > 90:
-            raise ValueError('Latitude must be between -90 and 90')
-        return v
-
-    @field_validator('lon')
-    @classmethod
-    def validate_annual_lon(cls, v):
-        if v < -180 or v > 180:
-            raise ValueError('Longitude must be between -180 and 180')
-        return v
 
 
 def annual_placement(jd: float, planet_id: int, natal_cusps) -> dict:
@@ -2143,3 +2149,108 @@ def get_annual_transits(request: AnnualTransitsRequest, api_key: str = Security(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+# ── Lifetime returns ─────────────────────────────────────────────────────────
+# Every exact return of each body over a whole life, from the birth instant,
+# plus the opposition passes of the slow bodies that oppose their natal degree
+# once in a lifetime (Uranus, mid-life). Built for the TMG Lifetime Returns
+# report (admin Astrology Reports tab): a table of return dates by age. Lunar
+# returns are excluded by design (thirteen a year — a monthly product, not a
+# lifetime one). The crossing walk is the /api/returns one — the departure
+# gate applies from birth, so post-natal wobble is never a return.
+
+LIFETIME_RETURN_BODIES = ["mercury", "venus", "sun", "mars", "jupiter", "saturn", "uranus"]
+LIFETIME_OPPOSITION_BODIES = ["uranus"]
+# Ages 20–125 on the report; the scan runs to the 126th birthday so age 125 is complete.
+LIFETIME_SPAN_YEARS_DEFAULT = 126
+LIFETIME_SPAN_YEARS_MAX = 130
+
+
+class LifetimeReturnsRequest(NatalChartRequest):
+    natal_positions: Dict[str, float]  # body → natal ecliptic longitude
+    bodies: List[str] = list(LIFETIME_RETURN_BODIES)
+    opposition_bodies: List[str] = list(LIFETIME_OPPOSITION_BODIES)
+    span_years: int = LIFETIME_SPAN_YEARS_DEFAULT
+
+    @field_validator('natal_positions')
+    @classmethod
+    def validate_lifetime_natal(cls, v):
+        return validate_longitude_map(v)
+
+    @field_validator('bodies', 'opposition_bodies')
+    @classmethod
+    def validate_lifetime_bodies(cls, v):
+        unknown = [b for b in v if b not in INGRESS_PLANET_IDS or b == "moon"]
+        if unknown:
+            raise ValueError(f"Lifetime bodies are {sorted(b for b in INGRESS_PLANET_IDS if b != 'moon')}; unknown: {unknown}")
+        return v
+
+    @field_validator('span_years')
+    @classmethod
+    def validate_lifetime_span(cls, v):
+        if v < 1 or v > LIFETIME_SPAN_YEARS_MAX:
+            raise ValueError(f'span_years must be between 1 and {LIFETIME_SPAN_YEARS_MAX}')
+        return v
+
+
+def lifetime_crossing(jd: float, planet_id: int) -> dict:
+    """One exact crossing instant: UT date, longitude, sign/degree, direction."""
+    lon, speed = returns_body_state(jd, planet_id)
+    sign_data = lon_to_sign_degree(lon)
+    return {
+        "date": jd_to_iso(jd),
+        "longitude": round(lon, 6),
+        "sign": sign_data["sign"],
+        "degree": round(sign_data["degree"], 4),
+        "is_retro": speed < 0,
+    }
+
+
+def lifetime_crossings(bodies, natal_positions, birth_jd: float, end_jd: float,
+                       antipode: bool) -> dict:
+    """Per body, every crossing of its natal longitude (or of the antipode —
+    the opposition) from birth to end_jd. A scan from birth of the natal
+    degree needs the departure gate; the antipode is 180° away at birth, so
+    it is already 'departed'."""
+    out = {}
+    for body in bodies:
+        planet_id = INGRESS_PLANET_IDS[body]
+        target_lon = request_target_lon(natal_positions[body], antipode)
+        crossings = find_return_crossings(
+            planet_id, target_lon, birth_jd, end_jd, RETURN_STEP_DAYS[body], departed=antipode)
+        out[body] = [lifetime_crossing(jd, planet_id) for jd in crossings]
+    return out
+
+
+def request_target_lon(natal_lon: float, antipode: bool) -> float:
+    return (natal_lon + (180.0 if antipode else 0.0)) % 360.0
+
+
+@app.post("/api/lifetime-returns")
+def get_lifetime_returns(request: LifetimeReturnsRequest, api_key: str = Security(verify_api_key)):
+    """Every exact return of each requested body from birth through
+    span_years, and every opposition pass of the opposition bodies — dates
+    only (the app buckets them by age). Retrograde multi-pass returns yield
+    every pass, flagged."""
+    logger.info(f"Lifetime returns requested for {request.bodies} over {request.span_years} years")
+    try:
+        missing = sorted({b for b in request.bodies + request.opposition_bodies if b not in request.natal_positions})
+        if missing:
+            raise HTTPException(status_code=422, detail=f"natal_positions missing bodies: {missing}")
+        birth_jd = calculate_julian_day(
+            request.birth_year, request.birth_month, request.birth_day,
+            request.birth_hour, request.birth_min, request.lat, request.lon,
+        )
+        end_jd = birth_jd + request.span_years * 365.25
+        return {
+            "birth_instant": jd_to_iso(birth_jd),
+            "end_instant": jd_to_iso(end_jd),
+            "span_years": request.span_years,
+            "returns": lifetime_crossings(request.bodies, request.natal_positions, birth_jd, end_jd, antipode=False),
+            "oppositions": lifetime_crossings(request.opposition_bodies, request.natal_positions, birth_jd, end_jd, antipode=True),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating lifetime returns: {str(e)}")
