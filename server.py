@@ -916,6 +916,39 @@ def bisect_station(j1: float, j2: float, planet_id: int, tol: float = 1e-4) -> f
             f1 = fm
     return (a + b) / 2.0
 
+STATION_SCAN_STEP_DAYS = 1.0  # slow-planet speed changes sign over weeks; daily scan cannot skip a turn
+
+
+def scan_stations(bodies, start_jd: float, end_jd: float) -> list:
+    """Every exact station (speed zero-crossing) of the given bodies in
+    [start_jd, end_jd], bisected to ~10 s and sorted by instant. Shared by
+    /api/stations and the annual report's retrograde section."""
+    stations = []
+    for body in bodies:
+        planet_id = STATION_PLANET_IDS[body]
+        jd = start_jd
+        prev_speed = get_transit_speed(jd, planet_id)
+        while jd < end_jd:
+            jd_next = min(jd + STATION_SCAN_STEP_DAYS, end_jd)
+            speed = get_transit_speed(jd_next, planet_id)
+            if prev_speed * speed <= 0.0 and prev_speed != speed:
+                jd_station = bisect_station(jd, jd_next, planet_id)
+                lon = get_transit_lon(jd_station, planet_id)
+                lon_data = lon_to_sign_degree(lon)
+                stations.append({
+                    "body": body,
+                    "date": jd_to_iso(jd_station),
+                    "jd": round(jd_station, 6),
+                    "longitude": round(lon, 6),
+                    "sign": lon_data["sign"],
+                    "degree": round(lon_data["degree"], 4),
+                    "type": "direct" if prev_speed < 0 else "retrograde"
+                })
+            prev_speed = speed
+            jd = jd_next
+    stations.sort(key=lambda s: s["jd"])
+    return stations
+
 @app.post("/api/stations")
 def get_stations(request: StationsRequest, api_key: str = Security(verify_api_key)):
     """Exact station events (retrograde/direct turns) over a date window"""
@@ -926,35 +959,7 @@ def get_stations(request: StationsRequest, api_key: str = Security(verify_api_ke
         start_jd = swe.julday(start_dt.year, start_dt.month, start_dt.day, 0.0, swe.GREG_CAL)
         end_jd = swe.julday(end_dt.year, end_dt.month, end_dt.day, 0.0, swe.GREG_CAL)
 
-        STEP_DAYS = 1.0  # slow-planet speed changes sign over weeks; daily scan cannot skip a turn
-        stations = []
-        for body in request.bodies:
-            planet_id = STATION_PLANET_IDS[body]
-            jd = start_jd
-            prev_speed = get_transit_speed(jd, planet_id)
-            while jd < end_jd:
-                jd_next = min(jd + STEP_DAYS, end_jd)
-                speed = get_transit_speed(jd_next, planet_id)
-                if prev_speed * speed <= 0.0 and prev_speed != speed:
-                    jd_station = bisect_station(jd, jd_next, planet_id)
-                    y, m, d, fh = swe.revjul(jd_station, swe.GREG_CAL)
-                    H = int(fh)
-                    M = int((fh - H) * 60)
-                    S = int((((fh - H) * 60) - M) * 60)
-                    lon_data = lon_to_sign_degree(get_transit_lon(jd_station, planet_id))
-                    stations.append({
-                        "body": body,
-                        "date": datetime(y, m, d, H, M, S).isoformat(),
-                        "jd": round(jd_station, 6),
-                        "longitude": round(get_transit_lon(jd_station, planet_id), 6),
-                        "sign": lon_data["sign"],
-                        "degree": round(lon_data["degree"], 4),
-                        "type": "direct" if prev_speed < 0 else "retrograde"
-                    })
-                prev_speed = speed
-                jd = jd_next
-
-        stations.sort(key=lambda s: s["jd"])
+        stations = scan_stations(request.bodies, start_jd, end_jd)
         return {"stations": stations, "count": len(stations)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error calculating stations: {str(e)}")
@@ -1845,6 +1850,294 @@ def get_monthly_transits(request: MonthlyTransitsRequest, api_key: str = Securit
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error calculating monthly transits: {str(e)}")
+
+
+# ── Annual transit report ────────────────────────────────────────────────────
+# One natal chart, one year from a start instant: the Sun's exact conjunctions
+# with the natal Sun and the four angles, every solar and lunar eclipse with
+# its natal house, every retrograde period that overlaps the year (station
+# to station, with the degrees), and each outer planet's current sign (when
+# it was entered) and its next sign change — every placement on the NATAL
+# house wheel. Built for the TMG Annual Transit Report (admin Astrology
+# Reports tab). All house math stays here; the app only pairs longitudes.
+
+ANNUAL_RETRO_BODIES = ["mercury", "venus", "mars", "jupiter", "saturn", "uranus", "neptune", "pluto"]
+ANNUAL_INGRESS_BODIES = ["jupiter", "saturn", "uranus", "neptune", "pluto"]
+ANNUAL_SUN_TARGET_KEYS = ["sun", "ascendant", "ic", "descendant", "midheaven"]
+
+# The Sun crosses any fixed longitude once per tropical year (365.24 d); a
+# 367-day search from the start instant therefore finds exactly one crossing.
+ANNUAL_SUN_SEARCH_DAYS = 367.0
+ANNUAL_SUN_STEP_DAYS = 0.5
+# A retrograde period is at most ~5.5 months (Neptune/Pluto ~160 d); scanning
+# stations this far either side of the year catches every overlapping pair.
+ANNUAL_STATION_PAD_DAYS = 200.0
+# Longest stay of any body in one sign: Pluto ~32 years (Taurus, 1852–1884).
+ANNUAL_INGRESS_HORIZON_DAYS = 35.0 * 365.25
+
+
+class AnnualTransitsRequest(BaseModel):
+    # UT instant the report year begins at ('YYYY-MM-DDTHH:MM:SS').
+    start_instant: str
+    span_days: int = 365
+    # Natal longitudes the transiting Sun is searched against, keyed by
+    # ANNUAL_SUN_TARGET_KEYS (the app passes the stored chart's values so the
+    # report agrees with the chart on screen).
+    sun_targets: Dict[str, float]
+    # Birth data for the natal house cusps (same contract as /api/returns).
+    lat: float
+    lon: float
+    birth_year: int
+    birth_month: int
+    birth_day: int
+    birth_hour: int
+    birth_min: int
+    house_type: Optional[str] = "placidus"
+    retro_bodies: List[str] = list(ANNUAL_RETRO_BODIES)
+    ingress_bodies: List[str] = list(ANNUAL_INGRESS_BODIES)
+
+    @field_validator('start_instant')
+    @classmethod
+    def validate_annual_start(cls, v):
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError('start_instant must be an ISO datetime (YYYY-MM-DDTHH:MM:SS)')
+        return v
+
+    @field_validator('span_days')
+    @classmethod
+    def validate_annual_span(cls, v):
+        if v < 1 or v > 400:
+            raise ValueError('span_days must be between 1 and 400')
+        return v
+
+    @field_validator('sun_targets')
+    @classmethod
+    def validate_annual_targets(cls, v):
+        unknown = [k for k in v if k not in ANNUAL_SUN_TARGET_KEYS]
+        if unknown:
+            raise ValueError(f"sun_targets keys are {ANNUAL_SUN_TARGET_KEYS}; unknown: {unknown}")
+        for key, lon in v.items():
+            if lon < 0 or lon > 360:
+                raise ValueError(f'{key} longitude must be between 0 and 360')
+        return v
+
+    @field_validator('retro_bodies')
+    @classmethod
+    def validate_annual_retro_bodies(cls, v):
+        unknown = [b for b in v if b not in STATION_PLANET_IDS]
+        if unknown:
+            raise ValueError(f"Bodies that station are {sorted(STATION_PLANET_IDS)}; unknown: {unknown}")
+        return v
+
+    @field_validator('ingress_bodies')
+    @classmethod
+    def validate_annual_ingress_bodies(cls, v):
+        unknown = [b for b in v if b not in INGRESS_PLANET_IDS]
+        if unknown:
+            raise ValueError(f"Known bodies are {sorted(INGRESS_PLANET_IDS)}; unknown: {unknown}")
+        return v
+
+    @field_validator('lat')
+    @classmethod
+    def validate_annual_lat(cls, v):
+        if v < -90 or v > 90:
+            raise ValueError('Latitude must be between -90 and 90')
+        return v
+
+    @field_validator('lon')
+    @classmethod
+    def validate_annual_lon(cls, v):
+        if v < -180 or v > 180:
+            raise ValueError('Longitude must be between -180 and 180')
+        return v
+
+
+def annual_placement(jd: float, planet_id: int, natal_cusps) -> dict:
+    """A body's longitude/sign/degree/speed at an instant plus its NATAL house."""
+    lon, speed = returns_body_state(jd, planet_id)
+    sign_data = lon_to_sign_degree(lon)
+    return {
+        "date": jd_to_iso(jd),
+        "jd": round(jd, 6),
+        "longitude": round(lon, 6),
+        "sign": sign_data["sign"],
+        "degree": round(sign_data["degree"], 4),
+        "speed": round(speed, 6),
+        "retrograde": speed < 0,
+        "natal_house": get_planet_house(lon, natal_cusps),
+    }
+
+
+def eclipse_type_label(retflag: int, lunar: bool) -> str:
+    if retflag & swe.ECL_ANNULAR_TOTAL:
+        return "hybrid"
+    if retflag & swe.ECL_TOTAL:
+        return "total"
+    if retflag & swe.ECL_ANNULAR:
+        return "annular"
+    if retflag & swe.ECL_PENUMBRAL:
+        return "penumbral"
+    if retflag & swe.ECL_PARTIAL:
+        return "partial"
+    return "lunar" if lunar else "solar"
+
+
+def find_eclipses(start_jd: float, end_jd: float, natal_cusps) -> list:
+    """Every solar and lunar eclipse whose maximum falls in [start, end], with
+    the eclipsed luminary's sign (Sun for a solar eclipse, Moon for a lunar
+    one — the sign the eclipse is named by) and its natal house. Penumbral
+    lunar eclipses are included: astrologers count them, and the template's
+    sample lists the penumbral eclipse of 2027-02-20."""
+    eclipses = []
+    for kind, finder, planet_id in (
+        ("solar", lambda jd: swe.sol_eclipse_when_glob(jd, swe.FLG_SWIEPH, 0), swe.SUN),
+        ("lunar", lambda jd: swe.lun_eclipse_when(jd, swe.FLG_SWIEPH, 0), swe.MOON),
+    ):
+        jd = start_jd
+        while True:
+            retflag, tret = finder(jd)
+            jd_max = tret[0]
+            if jd_max > end_jd:
+                break
+            placement = annual_placement(jd_max, planet_id, natal_cusps)
+            del placement["speed"], placement["retrograde"]
+            eclipses.append({"kind": kind, "type": eclipse_type_label(retflag, kind == "lunar"), **placement})
+            jd = jd_max + 1.0
+    eclipses.sort(key=lambda e: e["jd"])
+    return eclipses
+
+
+def find_retrograde_periods(bodies, start_jd: float, end_jd: float, natal_cusps) -> list:
+    """Retrograde periods (station retrograde → station direct) of each body
+    that overlap [start, end]. A period is included when any part of it falls
+    inside the year, so a retrograde already under way at the start counts."""
+    scan_start = start_jd - ANNUAL_STATION_PAD_DAYS
+    scan_end = end_jd + ANNUAL_STATION_PAD_DAYS
+    stations = scan_stations(bodies, scan_start, scan_end)
+    periods = []
+    for body in bodies:
+        own = [s for s in stations if s["body"] == body]
+        planet_id = STATION_PLANET_IDS[body]
+        for i, station in enumerate(own):
+            if station["type"] != "retrograde":
+                continue
+            direct = next((s for s in own[i + 1:] if s["type"] == "direct"), None)
+            retro_jd = station["jd"]
+            direct_jd = direct["jd"] if direct else None
+            overlaps = retro_jd < end_jd and (direct_jd is None or direct_jd > start_jd)
+            if not overlaps:
+                continue
+            periods.append({
+                "body": body,
+                "start": annual_placement(retro_jd, planet_id, natal_cusps),
+                "end": annual_placement(direct_jd, planet_id, natal_cusps) if direct_jd is not None else None,
+            })
+    periods.sort(key=lambda p: p["start"]["jd"])
+    return periods
+
+
+def find_sign_boundary(planet_id: int, start_jd: float, step: float, forward: bool) -> Optional[float]:
+    """The nearest instant a body's sign changes, walking forward or backward
+    from start_jd up to ANNUAL_INGRESS_HORIZON_DAYS, bisected to ~30 s. When
+    walking backward the returned instant is the moment the body ENTERED the
+    sign it holds at start_jd (in whichever direction it was moving)."""
+    def sign_of(jd: float) -> int:
+        return int((get_transit_lon(jd, planet_id) % 360.0) // 30)
+
+    direction = 1.0 if forward else -1.0
+    limit = start_jd + direction * ANNUAL_INGRESS_HORIZON_DAYS
+    jd = start_jd
+    prev_sign = sign_of(jd)
+    while (jd < limit) if forward else (jd > limit):
+        jd_next = jd + direction * step
+        if sign_of(jd_next) != prev_sign:
+            lo, hi = (jd, jd_next) if forward else (jd_next, jd)
+            return bisect_classification(lo, hi, sign_of)
+        jd = jd_next
+    return None
+
+
+def find_sign_transitions(bodies, start_jd: float, natal_cusps) -> list:
+    """Per body: the sign it holds at start_jd with the instant it entered
+    that sign (its most recent ingress into it, any direction), and its next
+    sign change after start_jd (any direction — a retrograde re-entry counts
+    and is flagged), each placed on the natal wheel."""
+    transitions = []
+    for body in bodies:
+        planet_id = INGRESS_PLANET_IDS[body]
+        step = INGRESS_STEP_DAYS[body]
+        entered_jd = find_sign_boundary(planet_id, start_jd, step, forward=False)
+        next_jd = find_sign_boundary(planet_id, start_jd, step, forward=True)
+        if entered_jd is None or next_jd is None:
+            raise HTTPException(status_code=500, detail=f"No sign boundary for {body} within the search horizon")
+        current_sign = lon_to_sign_degree(get_transit_lon(start_jd, planet_id))["sign"]
+        # Sample a hair past each boundary so the placement reports the sign
+        # actually entered rather than the boundary degree itself.
+        entered = annual_placement(entered_jd + 1e-4, planet_id, natal_cusps)
+        entered["date"] = jd_to_iso(entered_jd)
+        entered["jd"] = round(entered_jd, 6)
+        nxt = annual_placement(next_jd + 1e-4, planet_id, natal_cusps)
+        nxt["date"] = jd_to_iso(next_jd)
+        nxt["jd"] = round(next_jd, 6)
+        transitions.append({
+            "body": body,
+            "current": {**entered, "sign": current_sign},
+            "next": {**nxt, "from": current_sign},
+        })
+    return transitions
+
+
+def find_sun_conjunctions(targets: Dict[str, float], start_jd: float, natal_cusps) -> dict:
+    """The first exact conjunction of the transiting Sun with each natal
+    target longitude after start_jd (one per tropical year)."""
+    hits = {}
+    for key, target_lon in targets.items():
+        crossings = find_return_crossings(
+            swe.SUN, target_lon % 360.0, start_jd, start_jd + ANNUAL_SUN_SEARCH_DAYS,
+            ANNUAL_SUN_STEP_DAYS, departed=True)
+        if not crossings:
+            raise HTTPException(status_code=500, detail=f"No Sun conjunction with {key} found within a year")
+        hits[key] = annual_placement(crossings[0], swe.SUN, natal_cusps)
+    return hits
+
+
+@app.post("/api/annual-transits")
+def get_annual_transits(request: AnnualTransitsRequest, api_key: str = Security(verify_api_key)):
+    """One chart's transit year from start_instant: Sun conjunctions with the
+    natal targets, eclipses, overlapping retrograde periods, and the outer
+    planets' current and next signs — every placement with its natal house."""
+    logger.info(f"Annual transits requested from {request.start_instant} for {request.span_days} days")
+    try:
+        start_dt = datetime.fromisoformat(request.start_instant)
+        start_jd = swe.julday(
+            start_dt.year, start_dt.month, start_dt.day,
+            start_dt.hour + start_dt.minute / 60.0 + start_dt.second / 3600.0,
+            swe.GREG_CAL,
+        )
+        end_jd = start_jd + float(request.span_days)
+        birth_jd = calculate_julian_day(
+            request.birth_year, request.birth_month, request.birth_day,
+            request.birth_hour, request.birth_min, request.lat, request.lon,
+        )
+        if start_jd < birth_jd:
+            raise HTTPException(status_code=422, detail="start_instant is before the birth instant")
+        _, natal_cusps = calculate_houses_for_jd(birth_jd, request.lat, request.lon, request.house_type)
+
+        return {
+            "start_instant": request.start_instant,
+            "end_instant": jd_to_iso(end_jd),
+            "cusps": [round(c % 360.0, 6) for c in natal_cusps[:12]],
+            "sun_conjunctions": find_sun_conjunctions(request.sun_targets, start_jd, natal_cusps),
+            "eclipses": find_eclipses(start_jd, end_jd, natal_cusps),
+            "retrogrades": find_retrograde_periods(request.retro_bodies, start_jd, end_jd, natal_cusps),
+            "sign_transitions": find_sign_transitions(request.ingress_bodies, start_jd, natal_cusps),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating annual transits: {str(e)}")
 
 
 if __name__ == "__main__":
