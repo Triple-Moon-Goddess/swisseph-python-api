@@ -354,7 +354,8 @@ def root():
 @app.post("/api/planets")
 def get_planets(request: ChartRequest, api_key: str = Security(verify_api_key)):
     """Get planetary positions"""
-    logger.info(f"Planets calculation requested for {request.year}-{request.month}-{request.day}")
+    # Never log the request: its date, time and place are a person's birth data.
+    logger.info("Planets calculation requested")
     try:
         # Calculate Julian Day (with timezone conversion based on location)
         jd = calculate_julian_day(request.year, request.month, request.day,
@@ -366,9 +367,7 @@ def get_planets(request: ChartRequest, api_key: str = Security(verify_api_key)):
         for name, planet_id in PLANETS.items():
             try:
                 # All bodies use Swiss Ephemeris with .se1 files
-                print(f"Calculating {name} (id={planet_id})...")
                 xx, ret = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
-                print(f"  Success: {name} longitude={xx[0]}")
 
                 longitude = xx[0]
                 speed = xx[3]
@@ -405,7 +404,7 @@ def get_planets(request: ChartRequest, api_key: str = Security(verify_api_key)):
 @app.post("/api/houses")
 def get_houses(request: ChartRequest, api_key: str = Security(verify_api_key)):
     """Get house cusps"""
-    logger.info(f"Houses calculation requested for {request.year}-{request.month}-{request.day}")
+    logger.info("Houses calculation requested")  # no birth data in logs
     try:
         # Calculate Julian Day (with timezone conversion based on location)
         jd = calculate_julian_day(request.year, request.month, request.day,
@@ -447,7 +446,7 @@ def get_houses(request: ChartRequest, api_key: str = Security(verify_api_key)):
 @app.post("/api/chart")
 def get_chart(request: ChartRequest, api_key: str = Security(verify_api_key)):
     """Get complete chart data (planets + houses)"""
-    logger.info(f"Complete chart requested for {request.year}-{request.month}-{request.day}")
+    logger.info("Complete chart requested")  # no birth data in logs
     try:
         # Calculate Julian Day
         jd = calculate_julian_day(request.year, request.month, request.day,
