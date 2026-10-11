@@ -1957,6 +1957,17 @@ def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify
         node = planets["true_node"]
         planets["south_node"] = returns_placement((node["longitude"] + 180.0) % 360.0, node["speed"], wheels)
 
+        # The natal chart for the biwheel's inner ring: every body at the birth
+        # instant on the natal Placidus wheel, with the natal angles and cusps.
+        natal_wheel = {"natal": natal_cusps}
+        natal_chart_planets = {}
+        for chart_body, chart_pid in RETURN_CHART_BODY_IDS.items():
+            lon, speed = returns_body_state(birth_jd, chart_pid)
+            natal_chart_planets[chart_body] = returns_placement(lon, speed, natal_wheel)
+        natal_node = natal_chart_planets["true_node"]
+        natal_chart_planets["south_node"] = returns_placement(
+            (natal_node["longitude"] + 180.0) % 360.0, natal_node["speed"], natal_wheel)
+
         natal_planets = {}
         for natal_body, natal_lon in request.natal_positions.items():
             sign_data = lon_to_sign_degree(natal_lon)
@@ -2025,6 +2036,11 @@ def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify
             "natal": {
                 "planets": natal_planets,
                 "midheaven": natal_houses["midheaven"],
+                "chart": {
+                    "planets": natal_chart_planets,
+                    "angles": {key: natal_houses[key] for key in ("ascendant", "midheaven")},
+                    "houses": {f"house{i}": natal_houses[f"house{i}"] for i in range(1, 13)},
+                },
             },
             "self_aspects": self_aspects,
             "transits": transits,

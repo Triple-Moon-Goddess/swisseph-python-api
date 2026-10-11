@@ -135,6 +135,14 @@ def main():
     check("anchor between passes → cycle starts at the first pass",
           cycle["start"].startswith("2019-02-07") and len(cycle["start_passes"]) == 3, cycle["start"])
 
+    print("Natal chart for the biwheel")
+    out = run("sun", "current", "2026-10-11T19:00:00")
+    natal_chart = out["natal"]["chart"]
+    check("natal chart carries 12 bodies, angles and 12 cusps",
+          len(natal_chart["planets"]) == 12 and len(natal_chart["houses"]) == 12 and "ascendant" in natal_chart["angles"])
+    check("natal Sun on the wheel is the natal Sun",
+          server.angle_separation(natal_chart["planets"]["sun"]["longitude"], NATAL["sun"]) < 0.001)
+
     print("Birthplace-local anchor")
     request = server.ReturnChartRequest(
         **FIXTURE_BIRTH, anchor_instant="2026-10-11T12:00:00", anchor_local=True, body="sun",
