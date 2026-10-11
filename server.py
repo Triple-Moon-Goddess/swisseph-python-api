@@ -1530,6 +1530,27 @@ def find_return_crossings(planet_id: int, target_lon: float,
     return crossings
 
 
+# A retrograde return crosses the natal degree up to three times inside one
+# retrograde loop. Passes closer together than half the body's period are ONE
+# return, and its FIRST exact pass is the return moment (Lisa, 2026-10-11):
+# later passes belong to the same cycle. Half a period sits far above every
+# loop's span (Saturn's ~10 months of 29.5 years, Mercury's ~3 weeks of a
+# year) and far below the gap to the next return.
+RETURN_PASS_GROUP_FRACTION = 0.5
+
+
+def group_return_passes(crossings: list, period_days: float) -> list:
+    """Chronological crossings → returns, each a list of its passes (first
+    pass = the return moment)."""
+    events = []
+    for jd in crossings:
+        if events and jd - events[-1][-1] < RETURN_PASS_GROUP_FRACTION * period_days:
+            events[-1].append(jd)
+        else:
+            events.append([jd])
+    return events
+
+
 def find_self_aspect_hits(planet_id: int, natal_lon: float, angle: float,
                           start_jd: float, end_jd: float, step: float) -> list:
     """Exact perfection instants of one aspect angle between the transiting
@@ -1668,11 +1689,16 @@ def get_returns(request: ReturnsRequest, api_key: str = Security(verify_api_key)
             crossings = find_return_crossings(planet_id, target_lon, search_start, search_end, step,
                                               departed=search_start > birth_jd)
 
-            prev_hits = [jd for jd in crossings if jd <= anchor_jd]
-            next_hits = [jd for jd in crossings if jd > anchor_jd]
-            clamped_to_birth = len(prev_hits) == 0
-            cycle_start_jd = prev_hits[-1] if prev_hits else birth_jd
-            cycle_end_jd = next_hits[0] if next_hits else None
+            # A cycle runs from a return's FIRST pass to the next return's
+            # first pass; an anchor between two passes of one retrograde
+            # return is inside that return's cycle, not a new one.
+            events = group_return_passes(crossings, period)
+            prev_events = [e for e in events if e[0] <= anchor_jd]
+            next_events = [e for e in events if e[0] > anchor_jd]
+            clamped_to_birth = len(prev_events) == 0
+            cycle_start_jd = prev_events[-1][0] if prev_events else birth_jd
+            cycle_end_jd = next_events[0][0] if next_events else None
+            start_passes = prev_events[-1] if prev_events else []
 
             return_houses, return_cusps = calculate_houses_for_jd(
                 cycle_start_jd, request.lat, request.lon, request.house_type)
@@ -1720,6 +1746,7 @@ def get_returns(request: ReturnsRequest, api_key: str = Security(verify_api_key)
                     "end": jd_to_iso(cycle_end_jd) if cycle_end_jd is not None else None,
                     "clamped_to_birth": clamped_to_birth,
                     "end_found": cycle_end_jd is not None,
+                    "start_passes": [jd_to_iso(jd) for jd in start_passes],
                 },
                 "planets": planets,
                 "return_angles": returns_angles(return_houses, natal_cusps),
@@ -1732,6 +1759,271 @@ def get_returns(request: ReturnsRequest, api_key: str = Security(verify_api_key)
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error calculating returns: {str(e)}")
+
+
+# ── Return Chart report ──────────────────────────────────────────────────────
+# One return of one body, for the TMG Return Chart report (admin Astrology
+# Reports tab, Lisa's spec of 2026-10-11): the return moment and the period it
+# governs, the return chart at that moment (birth location — the caller's
+# house_type, Placidus for the report), the exact self-aspect perfections and
+# the exact transits to the natal chart through the period. The report's
+# policy (which transiting bodies count, any cap) is the caller's — this
+# endpoint returns every exact hit it is asked for.
+#
+# Period modes:
+#   current  — the return in effect at anchor_instant: its first pass up to
+#              the next return's first pass. Before the first true return
+#              has happened, the first (upcoming) return is used instead.
+#   first    — the first true return after birth, whatever the anchor
+#              (Uranus: the age-84 return — one per lifetime).
+#   lunation — the New Moon → New Moon window containing anchor_instant; the
+#              return moment is the Moon's first return to its natal degree
+#              inside that window (a synodic month always holds one).
+
+RETURN_CHART_PERIOD_MODES = ("current", "first", "lunation")
+# Scan reach, in periods: enough to find the cycle in effect AND the next two
+# returns (the upcoming case needs return + following return).
+RETURN_CHART_BACK_PERIODS = 1.35
+RETURN_CHART_AHEAD_PERIODS = 2.6
+
+
+class ReturnChartRequest(NatalChartRequest):
+    anchor_instant: str
+    body: str
+    period_mode: str = "current"
+    natal_positions: Dict[str, float]
+    transiting_bodies: List[str]
+    natal_targets: List[str]
+    transit_aspects: Dict[str, float]
+    self_aspects: Optional[Dict[str, float]] = None
+
+    @field_validator('anchor_instant')
+    @classmethod
+    def validate_rc_anchor(cls, v):
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError('anchor_instant must be an ISO datetime (YYYY-MM-DDTHH:MM:SS)')
+        return v
+
+    @field_validator('body')
+    @classmethod
+    def validate_rc_body(cls, v):
+        if v not in INGRESS_PLANET_IDS:
+            raise ValueError(f"Known bodies are {sorted(INGRESS_PLANET_IDS)}")
+        return v
+
+    @field_validator('period_mode')
+    @classmethod
+    def validate_rc_mode(cls, v):
+        if v not in RETURN_CHART_PERIOD_MODES:
+            raise ValueError(f"period_mode must be one of {RETURN_CHART_PERIOD_MODES}")
+        return v
+
+    @field_validator('natal_positions')
+    @classmethod
+    def validate_rc_natal(cls, v):
+        return validate_longitude_map(v)
+
+    @field_validator('transiting_bodies')
+    @classmethod
+    def validate_rc_transiting(cls, v):
+        unknown = [b for b in v if b not in INGRESS_PLANET_IDS]
+        if unknown:
+            raise ValueError(f"Known bodies are {sorted(INGRESS_PLANET_IDS)}; unknown: {unknown}")
+        return v
+
+    @field_validator('transit_aspects', 'self_aspects')
+    @classmethod
+    def validate_rc_aspects(cls, v):
+        if v is None:
+            return v
+        for name, angle in v.items():
+            if angle <= 0 or angle > 180:
+                raise ValueError(f'aspect {name} angle must be in (0, 180]')
+        return v
+
+
+def find_previous_new_moon(jd: float) -> float:
+    """The last new moon at or before jd (the waning→waxing flip of
+    lunar_phase_half, walked backwards, then bisected)."""
+    end_jd = jd - LUNATION_HORIZON_DAYS
+    later = jd
+    later_phase = lunar_phase_half(later)
+    while later > end_jd:
+        earlier = later - LUNATION_STEP_DAYS
+        earlier_phase = lunar_phase_half(earlier)
+        if earlier_phase == 1 and later_phase == 0:
+            return bisect_classification(earlier, later, lunar_phase_half)
+        later, later_phase = earlier, earlier_phase
+    raise ValueError("no new moon found in the preceding lunation")
+
+
+def return_chart_period(request, planet_id: int, target_lon: float, anchor_jd: float, birth_jd: float) -> dict:
+    """The return moment, its passes, and the period [start, end) per the
+    request's period_mode (see the section comment)."""
+    body = request.body
+    period = RETURN_PERIOD_DAYS[body]
+    step = RETURN_STEP_DAYS[body]
+
+    if request.period_mode == "lunation":
+        start_jd = find_previous_new_moon(anchor_jd)
+        nxt = find_next_lunations(anchor_jd)["new_moon"]
+        if nxt is None:
+            raise ValueError("no new moon found after the anchor")
+        end_jd = nxt["jd"]
+        passes = find_return_crossings(planet_id, target_lon, start_jd, end_jd, step)
+        if not passes:
+            raise ValueError("no lunar return inside the lunation window")
+        return {"moment": passes[0], "passes": passes[:1], "start": start_jd, "end": end_jd, "upcoming": False}
+
+    if request.period_mode == "first":
+        crossings = find_return_crossings(planet_id, target_lon, birth_jd,
+                                          birth_jd + RETURN_CHART_AHEAD_PERIODS * period, step, departed=False)
+        events = group_return_passes(crossings, period)
+        if len(events) < 2:
+            raise ValueError(f"{body}: the first return and the one after it were not both found")
+        return {"moment": events[0][0], "passes": events[0], "start": events[0][0],
+                "end": events[1][0], "upcoming": events[0][0] > anchor_jd}
+
+    search_start = max(birth_jd, anchor_jd - RETURN_CHART_BACK_PERIODS * period)
+    crossings = find_return_crossings(planet_id, target_lon, search_start,
+                                      anchor_jd + RETURN_CHART_AHEAD_PERIODS * period, step,
+                                      departed=search_start > birth_jd)
+    events = group_return_passes(crossings, period)
+    prev_events = [e for e in events if e[0] <= anchor_jd]
+    next_events = [e for e in events if e[0] > anchor_jd]
+    if prev_events:
+        current, following, upcoming = prev_events[-1], next_events[0] if next_events else None, False
+    else:
+        current = next_events[0] if next_events else None
+        following = next_events[1] if len(next_events) > 1 else None
+        upcoming = True
+    if current is None or following is None:
+        raise ValueError(f"{body}: the return in effect and the one after it were not both found")
+    return {"moment": current[0], "passes": current, "start": current[0], "end": following[0], "upcoming": upcoming}
+
+
+@app.post("/api/return-chart")
+def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify_api_key)):
+    """One body's return: moment, period, the return chart (birth location),
+    the exact self-aspects and the exact transits to the natal chart through
+    the period. Times are UT ISO strings."""
+    logger.info(f"Return chart requested for {request.body} ({request.period_mode})")
+    try:
+        anchor_dt = datetime.fromisoformat(request.anchor_instant)
+        anchor_jd = swe.julday(
+            anchor_dt.year, anchor_dt.month, anchor_dt.day,
+            anchor_dt.hour + anchor_dt.minute / 60.0 + anchor_dt.second / 3600.0,
+            swe.GREG_CAL,
+        )
+        birth_jd = calculate_julian_day(
+            request.birth_year, request.birth_month, request.birth_day,
+            request.birth_hour, request.birth_min, request.lat, request.lon,
+        )
+        if anchor_jd < birth_jd:
+            raise HTTPException(status_code=422, detail="anchor_instant is before the birth instant")
+        if request.period_mode == "lunation" and request.body != "moon":
+            raise HTTPException(status_code=422, detail="period_mode lunation is for the Moon only")
+        needed = {request.body, *request.natal_targets}
+        missing = sorted(b for b in needed if b not in request.natal_positions)
+        if missing:
+            raise HTTPException(status_code=422, detail=f"natal_positions missing bodies: {missing}")
+
+        planet_id = INGRESS_PLANET_IDS[request.body]
+        target_lon = request.natal_positions[request.body] % 360.0
+        try:
+            period = return_chart_period(request, planet_id, target_lon, anchor_jd, birth_jd)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+        natal_houses, natal_cusps = calculate_houses_for_jd(birth_jd, request.lat, request.lon, request.house_type)
+        return_houses, return_cusps = calculate_houses_for_jd(
+            period["moment"], request.lat, request.lon, request.house_type)
+        wheels = {"return": return_cusps, "natal": natal_cusps}
+
+        planets = {}
+        for chart_body, chart_pid in RETURN_CHART_BODY_IDS.items():
+            lon, speed = returns_body_state(period["moment"], chart_pid)
+            planets[chart_body] = returns_placement(lon, speed, wheels)
+        node = planets["true_node"]
+        planets["south_node"] = returns_placement((node["longitude"] + 180.0) % 360.0, node["speed"], wheels)
+
+        natal_planets = {}
+        for natal_body, natal_lon in request.natal_positions.items():
+            sign_data = lon_to_sign_degree(natal_lon)
+            natal_planets[natal_body] = {
+                "longitude": round(natal_lon % 360.0, 6),
+                "sign": sign_data["sign"],
+                "degree": round(sign_data["degree"], 4),
+                "natal_house": get_planet_house(natal_lon, natal_cusps),
+            }
+
+        def hit_placement(body_pid: int, jd: float) -> dict:
+            lon, speed = returns_body_state(jd, body_pid)
+            sign_data = lon_to_sign_degree(lon)
+            return {
+                "longitude": round(lon, 6),
+                "sign": sign_data["sign"],
+                "degree": round(sign_data["degree"], 4),
+                "natal_house": get_planet_house(lon, natal_cusps),
+                "is_retro": speed < 0,
+            }
+
+        start_jd, end_jd = period["start"], period["end"]
+        self_aspects = []
+        for aspect_name, angle in (request.self_aspects or RETURN_SELF_ASPECTS_DEFAULT).items():
+            for hit_jd in find_self_aspect_hits(planet_id, target_lon, angle, start_jd, end_jd,
+                                                RETURN_STEP_DAYS[request.body]):
+                self_aspects.append({"aspect": aspect_name, "date": jd_to_iso(hit_jd),
+                                     **hit_placement(planet_id, hit_jd)})
+        self_aspects.sort(key=lambda h: h["date"])
+
+        transits = []
+        for transiting in request.transiting_bodies:
+            t_pid = INGRESS_PLANET_IDS[transiting]
+            for natal_body in request.natal_targets:
+                natal_lon = request.natal_positions[natal_body] % 360.0
+                for aspect_name, angle in request.transit_aspects.items():
+                    for hit_jd in find_self_aspect_hits(t_pid, natal_lon, angle, start_jd, end_jd,
+                                                        RETURN_STEP_DAYS[transiting]):
+                        transits.append({
+                            "transiting": transiting,
+                            "natal": natal_body,
+                            "aspect": aspect_name,
+                            "date": jd_to_iso(hit_jd),
+                            "transit": hit_placement(t_pid, hit_jd),
+                        })
+        transits.sort(key=lambda h: h["date"])
+
+        return {
+            "body": request.body,
+            "period_mode": request.period_mode,
+            # The birthplace's IANA zone (the same lookup that turns the birth
+            # time into UT): the report prints every date in birthplace time.
+            "time_zone": TimezoneFinder().timezone_at(lat=request.lat, lng=request.lon) or "UTC",
+            "return": {
+                "moment": jd_to_iso(period["moment"]),
+                "passes": [jd_to_iso(jd) for jd in period["passes"]],
+                "upcoming": period["upcoming"],
+            },
+            "period": {"start": jd_to_iso(start_jd), "end": jd_to_iso(end_jd)},
+            "chart": {
+                "planets": planets,
+                "angles": returns_angles(return_houses, natal_cusps),
+                "houses": {f"house{i}": return_houses[f"house{i}"] for i in range(1, 13)},
+            },
+            "natal": {
+                "planets": natal_planets,
+                "midheaven": natal_houses["midheaven"],
+            },
+            "self_aspects": self_aspects,
+            "transits": transits,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating return chart: {str(e)}")
 
 
 # ── Monthly transit report ───────────────────────────────────────────────────
