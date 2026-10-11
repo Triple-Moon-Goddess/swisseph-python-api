@@ -1185,6 +1185,61 @@ class OrbWindowsRequest(BaseModel):
         return v
 
 
+def orb_windows_for_body(pid: int, step: float, targets: Dict[str, float],
+                         aspects: Dict[str, tuple], start_jd: float, end_jd: float) -> list:
+    """In-orb windows of one transiting body against fixed longitudes, per
+    aspect: while |separation - angle| <= orb. `targets` is name → longitude,
+    `aspects` name → (angle, orb). Windows already open at start_jd or still
+    open at end_jd are clamped and flagged. Edges are refined by comparison
+    bisection (~30 s), immune to the 0/360 wrap, the 180 deg separation
+    maximum, and retrograde direction. Returns dicts with natal, aspect,
+    enter_jd, exit_jd, enter_clamped, exit_clamped, in walk order."""
+    trackers = []
+    for natal_point, natal_lon in targets.items():
+        for aspect_name, (angle, orb) in aspects.items():
+            trackers.append({
+                "natal": natal_point, "natal_lon": natal_lon, "aspect": aspect_name,
+                "angle": angle, "orb": orb, "open_jd": None, "open_clamped": False,
+            })
+
+    def in_orb(jd: float, tr) -> bool:
+        sep = angle_separation(get_transit_lon(jd, pid), tr["natal_lon"])
+        return abs(sep - tr["angle"]) <= tr["orb"]
+
+    def closed(tr, exit_jd: float, exit_clamped: bool) -> dict:
+        return {"natal": tr["natal"], "aspect": tr["aspect"], "enter_jd": tr["open_jd"], "exit_jd": exit_jd,
+                "enter_clamped": tr["open_clamped"], "exit_clamped": exit_clamped}
+
+    for tr in trackers:
+        if in_orb(start_jd, tr):
+            tr["open_jd"] = start_jd
+            tr["open_clamped"] = True
+
+    windows = []
+    jd = start_jd
+    while jd < end_jd:
+        jd_next = min(jd + step, end_jd)
+        for tr in trackers:
+            inside = in_orb(jd_next, tr)
+            was_inside = tr["open_jd"] is not None
+            if inside == was_inside:
+                continue
+            jd_x = bisect_classification(jd, jd_next, lambda j: in_orb(j, tr))
+            if inside:
+                tr["open_jd"] = jd_x
+                tr["open_clamped"] = False
+            else:
+                windows.append(closed(tr, jd_x, False))
+                tr["open_jd"] = None
+                tr["open_clamped"] = False
+        jd = jd_next
+
+    for tr in trackers:
+        if tr["open_jd"] is not None:
+            windows.append(closed(tr, end_jd, True))
+    return windows
+
+
 @app.post("/api/orb-windows")
 def get_orb_windows(request: OrbWindowsRequest, api_key: str = Security(verify_api_key)):
     """In-orb windows (enter/exit instants) for transiting bodies against natal
@@ -1205,62 +1260,16 @@ def get_orb_windows(request: OrbWindowsRequest, api_key: str = Security(verify_a
 
         windows = []
         for body in request.bodies:
-            pid = INGRESS_PLANET_IDS[body]
-            step = INGRESS_STEP_DAYS[body]
-
-            # One pass per body over the JD walk; every (natal point, aspect)
-            # tracks its own open window. The ephemeris longitude per JD is
-            # memoised (get_transit_lon), so the inner loops are float math.
-            trackers = []
-            for natal_point, natal_lon in request.natal_positions.items():
-                for aspect_name, spec in request.aspects.items():
-                    trackers.append({
-                        "natal": natal_point, "natal_lon": natal_lon,
-                        "aspect": aspect_name,
-                        "angle": float(spec["angle"]), "orb": float(spec["orb"]),
-                        "open_jd": None, "open_clamped": False,
-                    })
-
-            def in_orb(jd: float, tr) -> bool:
-                sep = angle_separation(get_transit_lon(jd, pid), tr["natal_lon"])
-                return abs(sep - tr["angle"]) <= tr["orb"]
-
-            for tr in trackers:
-                if in_orb(start_jd, tr):
-                    tr["open_jd"] = start_jd
-                    tr["open_clamped"] = True
-
-            jd = start_jd
-            while jd < end_jd:
-                jd_next = min(jd + step, end_jd)
-                for tr in trackers:
-                    inside = in_orb(jd_next, tr)
-                    was_inside = tr["open_jd"] is not None
-                    if inside == was_inside:
-                        continue
-                    jd_x = bisect_classification(jd, jd_next, lambda j: in_orb(j, tr))
-                    if inside:
-                        tr["open_jd"] = jd_x
-                        tr["open_clamped"] = False
-                    else:
-                        windows.append({
-                            "body": body, "natal": tr["natal"], "aspect": tr["aspect"],
-                            "enter": jd_to_iso(tr["open_jd"]), "exit": jd_to_iso(jd_x),
-                            "enter_jd": round(tr["open_jd"], 6), "exit_jd": round(jd_x, 6),
-                            "enter_clamped": tr["open_clamped"], "exit_clamped": False,
-                        })
-                        tr["open_jd"] = None
-                        tr["open_clamped"] = False
-                jd = jd_next
-
-            for tr in trackers:
-                if tr["open_jd"] is not None:
-                    windows.append({
-                        "body": body, "natal": tr["natal"], "aspect": tr["aspect"],
-                        "enter": jd_to_iso(tr["open_jd"]), "exit": jd_to_iso(end_jd),
-                        "enter_jd": round(tr["open_jd"], 6), "exit_jd": round(end_jd, 6),
-                        "enter_clamped": tr["open_clamped"], "exit_clamped": True,
-                    })
+            targets = {point: lon for point, lon in request.natal_positions.items()}
+            aspects = {name: (float(spec["angle"]), float(spec["orb"])) for name, spec in request.aspects.items()}
+            for w in orb_windows_for_body(INGRESS_PLANET_IDS[body], INGRESS_STEP_DAYS[body],
+                                          targets, aspects, start_jd, end_jd):
+                windows.append({
+                    "body": body, "natal": w["natal"], "aspect": w["aspect"],
+                    "enter": jd_to_iso(w["enter_jd"]), "exit": jd_to_iso(w["exit_jd"]),
+                    "enter_jd": round(w["enter_jd"], 6), "exit_jd": round(w["exit_jd"], 6),
+                    "enter_clamped": w["enter_clamped"], "exit_clamped": w["exit_clamped"],
+                })
 
         windows.sort(key=lambda w: w["enter_jd"])
         return {"windows": windows, "count": len(windows)}
@@ -1763,12 +1772,12 @@ def get_returns(request: ReturnsRequest, api_key: str = Security(verify_api_key)
 
 # ── Return Chart report ──────────────────────────────────────────────────────
 # One return of one body, for the TMG Return Chart report (admin Astrology
-# Reports tab, Lisa's spec of 2026-10-11): the return moment and the period it
-# governs, the return chart at that moment (birth location — the caller's
-# house_type, Placidus for the report), the exact self-aspect perfections and
-# the exact transits to the natal chart through the period. The report's
-# policy (which transiting bodies count, any cap) is the caller's — this
-# endpoint returns every exact hit it is asked for.
+# Reports tab; Lisa's spec of 2026-10-11, Cycles of Life pp. 252–255): the
+# return moment and the period it governs, the return chart at that moment
+# (birth location — the caller's house_type, Placidus for the report), the
+# natal chart for the biwheel, and the return planet's aspects to its OWN natal
+# position through the period: every in-orb window with its enter / exit
+# instants and every exact hit inside it.
 #
 # Period modes:
 #   current  — the return in effect at anchor_instant: its first pass up to
@@ -1776,15 +1785,21 @@ def get_returns(request: ReturnsRequest, api_key: str = Security(verify_api_key)
 #              has happened, the first (upcoming) return is used instead.
 #   first    — the first true return after birth, whatever the anchor
 #              (Uranus: the age-84 return — one per lifetime).
-#   lunation — the New Moon → New Moon window containing anchor_instant; the
-#              return moment is the Moon's first return to its natal degree
-#              inside that window (a synodic month always holds one).
 
-RETURN_CHART_PERIOD_MODES = ("current", "first", "lunation")
+RETURN_CHART_PERIOD_MODES = ("current", "first")
 # Scan reach, in periods: enough to find the cycle in effect AND the next two
 # returns (the upcoming case needs return + following return).
 RETURN_CHART_BACK_PERIODS = 1.35
 RETURN_CHART_AHEAD_PERIODS = 2.6
+# The aspects the report tracks, exact angles (Lisa: conjunction, sextile,
+# square, trine, opposition), and the orb they are "in" within.
+RETURN_CHART_ASPECTS_DEFAULT = {
+    "Conjunction": 0.0, "Sextile": 60.0, "Square": 90.0, "Trine": 120.0, "Opposition": 180.0,
+}
+RETURN_CHART_ORB_DEFAULT = 8.0
+# The Moon moves ~13 deg a day: the Lunar walk steps hourly (Lisa's spec);
+# every other body uses its return step (a day or less).
+RETURN_CHART_MOON_STEP_DAYS = 1.0 / 24.0
 
 
 class ReturnChartRequest(NatalChartRequest):
@@ -1796,10 +1811,8 @@ class ReturnChartRequest(NatalChartRequest):
     # lookup as the birth time. False: anchor_instant is UT.
     anchor_local: bool = False
     natal_positions: Dict[str, float]
-    transiting_bodies: List[str]
-    natal_targets: List[str]
-    transit_aspects: Dict[str, float]
-    self_aspects: Optional[Dict[str, float]] = None
+    aspects: Optional[Dict[str, float]] = None
+    orb: float = RETURN_CHART_ORB_DEFAULT
 
     @field_validator('anchor_instant')
     @classmethod
@@ -1829,38 +1842,22 @@ class ReturnChartRequest(NatalChartRequest):
     def validate_rc_natal(cls, v):
         return validate_longitude_map(v)
 
-    @field_validator('transiting_bodies')
-    @classmethod
-    def validate_rc_transiting(cls, v):
-        unknown = [b for b in v if b not in INGRESS_PLANET_IDS]
-        if unknown:
-            raise ValueError(f"Known bodies are {sorted(INGRESS_PLANET_IDS)}; unknown: {unknown}")
-        return v
-
-    @field_validator('transit_aspects', 'self_aspects')
+    @field_validator('aspects')
     @classmethod
     def validate_rc_aspects(cls, v):
         if v is None:
             return v
         for name, angle in v.items():
-            if angle <= 0 or angle > 180:
-                raise ValueError(f'aspect {name} angle must be in (0, 180]')
+            if angle < 0 or angle > 180:
+                raise ValueError(f'aspect {name} angle must be in [0, 180]')
         return v
 
-
-def find_previous_new_moon(jd: float) -> float:
-    """The last new moon at or before jd (the waning→waxing flip of
-    lunar_phase_half, walked backwards, then bisected)."""
-    end_jd = jd - LUNATION_HORIZON_DAYS
-    later = jd
-    later_phase = lunar_phase_half(later)
-    while later > end_jd:
-        earlier = later - LUNATION_STEP_DAYS
-        earlier_phase = lunar_phase_half(earlier)
-        if earlier_phase == 1 and later_phase == 0:
-            return bisect_classification(earlier, later, lunar_phase_half)
-        later, later_phase = earlier, earlier_phase
-    raise ValueError("no new moon found in the preceding lunation")
+    @field_validator('orb')
+    @classmethod
+    def validate_rc_orb(cls, v):
+        if v <= 0 or v > 15:
+            raise ValueError('orb must be in (0, 15]')
+        return v
 
 
 def return_chart_period(request, planet_id: int, target_lon: float, anchor_jd: float, birth_jd: float) -> dict:
@@ -1869,17 +1866,6 @@ def return_chart_period(request, planet_id: int, target_lon: float, anchor_jd: f
     body = request.body
     period = RETURN_PERIOD_DAYS[body]
     step = RETURN_STEP_DAYS[body]
-
-    if request.period_mode == "lunation":
-        start_jd = find_previous_new_moon(anchor_jd)
-        nxt = find_next_lunations(anchor_jd)["new_moon"]
-        if nxt is None:
-            raise ValueError("no new moon found after the anchor")
-        end_jd = nxt["jd"]
-        passes = find_return_crossings(planet_id, target_lon, start_jd, end_jd, step)
-        if not passes:
-            raise ValueError("no lunar return inside the lunation window")
-        return {"moment": passes[0], "passes": passes[:1], "start": start_jd, "end": end_jd, "upcoming": False}
 
     if request.period_mode == "first":
         crossings = find_return_crossings(planet_id, target_lon, birth_jd,
@@ -1908,11 +1894,30 @@ def return_chart_period(request, planet_id: int, target_lon: float, anchor_jd: f
     return {"moment": current[0], "passes": current, "start": current[0], "end": following[0], "upcoming": upcoming}
 
 
+# Edge tolerance for an exact hit at a window or period edge: the crossing
+# bisection stops within ~1 s (1e-5 d), so a hit ON an edge (the return moment
+# at the period start) can land a hair outside it. 2e-4 d is ~17 s.
+RETURN_CHART_EDGE_TOL_DAYS = 2e-4
+
+
+def exact_hits_in(planet_id: int, natal_lon: float, angle: float, lo: float, hi: float, step: float) -> list:
+    """Exact perfections of one aspect inside [lo, hi]. A conjunction is a
+    signed crossing of the natal degree (the separation only touches 0, so it
+    has no sign change to find); other angles use the self-aspect search."""
+    pad = step
+    tol = RETURN_CHART_EDGE_TOL_DAYS
+    if angle == 0.0:
+        hits = find_return_crossings(planet_id, natal_lon, lo - pad, hi + pad, step)
+    else:
+        hits = find_self_aspect_hits(planet_id, natal_lon, angle, lo - pad, hi + pad, step)
+    return [jd for jd in hits if lo - tol <= jd <= hi + tol]
+
+
 @app.post("/api/return-chart")
 def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify_api_key)):
     """One body's return: moment, period, the return chart (birth location),
-    the exact self-aspects and the exact transits to the natal chart through
-    the period. Times are UT ISO strings."""
+    the natal chart for the biwheel, and the return planet's aspect windows to
+    its own natal position through the period. Times are UT ISO strings."""
     logger.info(f"Return chart requested for {request.body} ({request.period_mode})")
     try:
         anchor_dt = datetime.fromisoformat(request.anchor_instant)
@@ -1931,12 +1936,8 @@ def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify
         )
         if anchor_jd < birth_jd:
             raise HTTPException(status_code=422, detail="anchor_instant is before the birth instant")
-        if request.period_mode == "lunation" and request.body != "moon":
-            raise HTTPException(status_code=422, detail="period_mode lunation is for the Moon only")
-        needed = {request.body, *request.natal_targets}
-        missing = sorted(b for b in needed if b not in request.natal_positions)
-        if missing:
-            raise HTTPException(status_code=422, detail=f"natal_positions missing bodies: {missing}")
+        if request.body not in request.natal_positions:
+            raise HTTPException(status_code=422, detail=f"natal_positions missing body: {request.body}")
 
         planet_id = INGRESS_PLANET_IDS[request.body]
         target_lon = request.natal_positions[request.body] % 360.0
@@ -1968,20 +1969,19 @@ def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify
         natal_chart_planets["south_node"] = returns_placement(
             (natal_node["longitude"] + 180.0) % 360.0, natal_node["speed"], natal_wheel)
 
-        natal_planets = {}
-        for natal_body, natal_lon in request.natal_positions.items():
-            sign_data = lon_to_sign_degree(natal_lon)
-            natal_planets[natal_body] = {
-                "longitude": round(natal_lon % 360.0, 6),
-                "sign": sign_data["sign"],
-                "degree": round(sign_data["degree"], 4),
-                "natal_house": get_planet_house(natal_lon, natal_cusps),
-            }
+        natal_sign = lon_to_sign_degree(target_lon)
+        natal_body = {
+            "longitude": round(target_lon, 6),
+            "sign": natal_sign["sign"],
+            "degree": round(natal_sign["degree"], 4),
+            "natal_house": get_planet_house(target_lon, natal_cusps),
+        }
 
-        def hit_placement(body_pid: int, jd: float) -> dict:
-            lon, speed = returns_body_state(jd, body_pid)
+        def hit_placement(jd: float) -> dict:
+            lon, speed = returns_body_state(jd, planet_id)
             sign_data = lon_to_sign_degree(lon)
             return {
+                "date": jd_to_iso(jd),
                 "longitude": round(lon, 6),
                 "sign": sign_data["sign"],
                 "degree": round(sign_data["degree"], 4),
@@ -1990,30 +1990,27 @@ def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify
             }
 
         start_jd, end_jd = period["start"], period["end"]
-        self_aspects = []
-        for aspect_name, angle in (request.self_aspects or RETURN_SELF_ASPECTS_DEFAULT).items():
-            for hit_jd in find_self_aspect_hits(planet_id, target_lon, angle, start_jd, end_jd,
-                                                RETURN_STEP_DAYS[request.body]):
-                self_aspects.append({"aspect": aspect_name, "date": jd_to_iso(hit_jd),
-                                     **hit_placement(planet_id, hit_jd)})
-        self_aspects.sort(key=lambda h: h["date"])
-
-        transits = []
-        for transiting in request.transiting_bodies:
-            t_pid = INGRESS_PLANET_IDS[transiting]
-            for natal_body in request.natal_targets:
-                natal_lon = request.natal_positions[natal_body] % 360.0
-                for aspect_name, angle in request.transit_aspects.items():
-                    for hit_jd in find_self_aspect_hits(t_pid, natal_lon, angle, start_jd, end_jd,
-                                                        RETURN_STEP_DAYS[transiting]):
-                        transits.append({
-                            "transiting": transiting,
-                            "natal": natal_body,
-                            "aspect": aspect_name,
-                            "date": jd_to_iso(hit_jd),
-                            "transit": hit_placement(t_pid, hit_jd),
-                        })
-        transits.sort(key=lambda h: h["date"])
+        step = RETURN_CHART_MOON_STEP_DAYS if request.body == "moon" else RETURN_STEP_DAYS[request.body]
+        aspect_angles = request.aspects or RETURN_CHART_ASPECTS_DEFAULT
+        windows = []
+        for w in orb_windows_for_body(planet_id, step, {request.body: target_lon},
+                                      {name: (angle, request.orb) for name, angle in aspect_angles.items()},
+                                      start_jd, end_jd):
+            angle = aspect_angles[w["aspect"]]
+            exacts = exact_hits_in(planet_id, target_lon, angle, w["enter_jd"], w["exit_jd"], step)
+            # The period ends where the next return begins: that conjunction
+            # belongs to the next cycle.
+            exacts = [jd for jd in exacts if jd < end_jd - RETURN_CHART_EDGE_TOL_DAYS]
+            windows.append({
+                "aspect": w["aspect"],
+                "enter": jd_to_iso(w["enter_jd"]),
+                "exit": jd_to_iso(w["exit_jd"]),
+                "enter_clamped": w["enter_clamped"],
+                "exit_clamped": w["exit_clamped"],
+                "exacts": [hit_placement(jd) for jd in exacts],
+                "at_enter": hit_placement(w["enter_jd"]),
+            })
+        windows.sort(key=lambda w: w["enter"])
 
         return {
             "body": request.body,
@@ -2034,7 +2031,7 @@ def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify
                 "houses": {f"house{i}": return_houses[f"house{i}"] for i in range(1, 13)},
             },
             "natal": {
-                "planets": natal_planets,
+                "body": natal_body,
                 "midheaven": natal_houses["midheaven"],
                 "chart": {
                     "planets": natal_chart_planets,
@@ -2042,8 +2039,7 @@ def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify
                     "houses": {f"house{i}": natal_houses[f"house{i}"] for i in range(1, 13)},
                 },
             },
-            "self_aspects": self_aspects,
-            "transits": transits,
+            "self_windows": windows,
         }
     except HTTPException:
         raise

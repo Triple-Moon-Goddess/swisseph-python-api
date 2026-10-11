@@ -15,10 +15,7 @@ FIXTURE_BIRTH = dict(
     birth_year=1990, birth_month=1, birth_day=1, birth_hour=12, birth_min=0,
     lat=40.7128, lon=-74.0060, house_type="placidus",
 )
-ALL = list(server.INGRESS_PLANET_IDS.keys())
-OUTER = ["jupiter", "saturn", "uranus", "neptune", "pluto"]
-INNER = ["sun", "moon", "mercury", "venus", "mars"]
-ASPECTS = {"Sextile": 60.0, "Square": 90.0, "Trine": 120.0, "Opposition": 180.0}
+ANGLES = dict(server.RETURN_CHART_ASPECTS_DEFAULT)
 
 
 def natal_positions():
@@ -35,11 +32,9 @@ def iso_jd(iso: str) -> float:
     return swe.julday(y, m, d, hh + mm / 60.0 + ss / 3600.0, swe.GREG_CAL)
 
 
-def run(body, mode, anchor, transiting=OUTER, targets=INNER):
+def run(body, mode, anchor):
     request = server.ReturnChartRequest(
-        **FIXTURE_BIRTH, anchor_instant=anchor, body=body, period_mode=mode,
-        natal_positions=NATAL, transiting_bodies=transiting, natal_targets=targets,
-        transit_aspects=ASPECTS,
+        **FIXTURE_BIRTH, anchor_instant=anchor, body=body, period_mode=mode, natal_positions=NATAL,
     )
     return server.get_return_chart(request, "test")
 
@@ -75,23 +70,58 @@ def main():
     check("birthplace time zone returned", out["time_zone"] == "America/New_York", out["time_zone"])
     check("return chart carries 12 house cusps", len(out["chart"]["houses"]) == 12)
 
-    print("Lunar — New Moon window")
+    print("Lunar — the return in effect, like every type")
     anchor = "2026-10-11T19:00:00"
-    out = run("moon", "lunation", anchor, ALL, ALL)
+    out = run("moon", "current", anchor)
     start, end = iso_jd(out["period"]["start"]), iso_jd(out["period"]["end"])
-    for label, jd in (("start", start), ("end", end)):
-        elong = server.angle_separation(server.get_transit_lon(jd, swe.MOON), server.get_transit_lon(jd, swe.SUN))
-        check(f"window {label} is a new moon", elong < 0.05, f"{elong:.4f}°")
-    check("window contains the anchor", start <= iso_jd(anchor) < end)
-    m = iso_jd(out["return"]["moment"])
-    check("lunar return inside the window", start <= m < end)
-    check("Moon on its natal degree at the moment",
-          server.angle_separation(server.get_transit_lon(m, swe.MOON), NATAL["moon"]) < 0.001)
+    check("Lunar period is one sidereal month", 27.0 < end - start < 27.7, f"{end - start:.2f}d")
+    check("period contains the anchor", start <= iso_jd(anchor) < end)
+    check("Moon on its natal degree at the return",
+          server.angle_separation(server.get_transit_lon(start, swe.MOON), NATAL["moon"]) < 0.001)
     try:
-        run("sun", "lunation", anchor)
-        check("lunation refused for a non-Moon body", False)
-    except HTTPException as e:
-        check("lunation refused for a non-Moon body", e.status_code == 422)
+        server.ReturnChartRequest(**FIXTURE_BIRTH, anchor_instant=anchor, body="moon", period_mode="lunation", natal_positions=NATAL)
+        check("the New Moon window mode is gone", False)
+    except Exception:
+        check("the New Moon window mode is gone", True)
+
+    print("Self-aspect windows (the planet's relationship with itself)")
+    out = run("sun", "current", "2026-10-11T19:00:00")
+    wins = out["self_windows"]
+    ps, pe = iso_jd(out["period"]["start"]), iso_jd(out["period"]["end"])
+    exact_count = {}
+    for w in wins:
+        exact_count[w["aspect"]] = exact_count.get(w["aspect"], 0) + len(w["exacts"])
+    check("Sun: 1 conjunction (the return), 2 sextiles, 2 squares, 2 trines, 1 opposition exact",
+          exact_count == {"Conjunction": 1, "Sextile": 2, "Square": 2, "Trine": 2, "Opposition": 1}, str(exact_count))
+    conj = [w for w in wins if w["aspect"] == "Conjunction"]
+    check("conjunction in orb at the period start is clamped to the start, and its exact is the return",
+          conj[0]["enter_clamped"] and conj[0]["enter"] == out["period"]["start"]
+          and abs(iso_jd(conj[0]["exacts"][0]["date"]) - ps) < 3e-4)
+    check("conjunction still in orb at the period end is clamped to the end, with no exact (next cycle)",
+          conj[-1]["exit_clamped"] and conj[-1]["exit"] == out["period"]["end"] and conj[-1]["exacts"] == [])
+    worst_exact, worst_edge, inside = 0.0, 0.0, True
+    for w in wins:
+        angle = ANGLES[w["aspect"]]
+        for hit in w["exacts"]:
+            jd = iso_jd(hit["date"])
+            inside = inside and iso_jd(w["enter"]) - 1e-4 <= jd <= iso_jd(w["exit"]) + 1e-4
+            worst_exact = max(worst_exact, abs(server.angle_separation(server.get_transit_lon(jd, swe.SUN), NATAL["sun"]) - angle))
+        for edge, clamped in ((w["enter"], w["enter_clamped"]), (w["exit"], w["exit_clamped"])):
+            if not clamped:
+                sep = server.angle_separation(server.get_transit_lon(iso_jd(edge), swe.SUN), NATAL["sun"])
+                worst_edge = max(worst_edge, abs(abs(sep - angle) - 8.0))
+    check("every exact is exact", worst_exact < 0.01, f"worst {worst_exact:.5f}°")
+    check("every exact sits inside its window", inside)
+    check("window edges are the 8° orb", worst_edge < 0.01, f"worst {worst_edge:.5f}°")
+    check("windows in date order", [w["enter"] for w in wins] == sorted(w["enter"] for w in wins))
+
+    out = run("saturn", "current", "2026-10-11T19:00:00")
+    check("a retrograde Saturn lists more than one exact in a window",
+          any(len(w["exacts"]) > 1 for w in out["self_windows"]))
+    out = run("moon", "current", "2026-10-11T19:00:00")
+    check("Lunar windows are found on the hourly walk (8 exact aspects in a month)",
+          sum(len(w["exacts"]) for w in out["self_windows"] if w["aspect"] != "Conjunction") == 7
+          and sum(len(w["exacts"]) for w in out["self_windows"] if w["aspect"] == "Conjunction") == 1)
 
     print("Saturn — first pass, current and upcoming")
     out = run("saturn", "current", "2026-10-11T19:00:00")
@@ -108,23 +138,6 @@ def main():
     year = int(out["return"]["moment"][:4])
     check("Uranus return in the early 2070s", 2072 <= year <= 2074, out["return"]["moment"])
     check("flagged upcoming", out["return"]["upcoming"] is True)
-
-    print("Exact transits")
-    out = run("saturn", "current", "2026-10-11T19:00:00")
-    ps, pe = iso_jd(out["period"]["start"]), iso_jd(out["period"]["end"])
-    worst = 0.0
-    inside = True
-    for hit in out["transits"]:
-        jd = iso_jd(hit["date"])
-        inside = inside and ps <= jd <= pe
-        sep = server.angle_separation(
-            server.get_transit_lon(jd, server.INGRESS_PLANET_IDS[hit["transiting"]]), NATAL[hit["natal"]])
-        worst = max(worst, abs(sep - ASPECTS[hit["aspect"]]))
-    check("every transit is exact", worst < 0.01, f"worst {worst:.5f}°")
-    check("every transit falls inside the period", inside)
-    check("only the requested bodies", all(h["transiting"] in OUTER and h["natal"] in INNER for h in out["transits"]))
-    dates = [h["date"] for h in out["transits"]]
-    check("transits in date order", dates == sorted(dates))
 
     print("/api/returns uses the first pass")
     request = server.ReturnsRequest(
@@ -146,8 +159,7 @@ def main():
     print("Birthplace-local anchor")
     request = server.ReturnChartRequest(
         **FIXTURE_BIRTH, anchor_instant="2026-10-11T12:00:00", anchor_local=True, body="sun",
-        period_mode="current", natal_positions=NATAL, transiting_bodies=OUTER, natal_targets=INNER,
-        transit_aspects=ASPECTS,
+        period_mode="current", natal_positions=NATAL,
     )
     out = server.get_return_chart(request, "test")
     check("noon New York (EDT) is 16:00 UT",
