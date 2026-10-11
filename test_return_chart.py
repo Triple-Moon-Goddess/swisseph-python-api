@@ -135,6 +135,16 @@ def main():
     check("anchor between passes → cycle starts at the first pass",
           cycle["start"].startswith("2019-02-07") and len(cycle["start_passes"]) == 3, cycle["start"])
 
+    print("Birthplace-local anchor")
+    request = server.ReturnChartRequest(
+        **FIXTURE_BIRTH, anchor_instant="2026-10-11T12:00:00", anchor_local=True, body="sun",
+        period_mode="current", natal_positions=NATAL, transiting_bodies=OUTER, natal_targets=INNER,
+        transit_aspects=ASPECTS,
+    )
+    out = server.get_return_chart(request, "test")
+    check("noon New York (EDT) is 16:00 UT",
+          abs(iso_jd(out["anchor_ut"]) - swe.julday(2026, 10, 11, 16.0, swe.GREG_CAL)) < 2 / 86400.0, out["anchor_ut"])
+
     if failures:
         print(f"\n{len(failures)} return-chart check(s) FAILED: {failures}")
         raise SystemExit(1)

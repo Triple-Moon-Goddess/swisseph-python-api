@@ -1791,6 +1791,10 @@ class ReturnChartRequest(NatalChartRequest):
     anchor_instant: str
     body: str
     period_mode: str = "current"
+    # True: anchor_instant is civil time at the birthplace (the report's run
+    # date is read where the chart is cast), converted with the same zone
+    # lookup as the birth time. False: anchor_instant is UT.
+    anchor_local: bool = False
     natal_positions: Dict[str, float]
     transiting_bodies: List[str]
     natal_targets: List[str]
@@ -1912,11 +1916,15 @@ def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify
     logger.info(f"Return chart requested for {request.body} ({request.period_mode})")
     try:
         anchor_dt = datetime.fromisoformat(request.anchor_instant)
-        anchor_jd = swe.julday(
-            anchor_dt.year, anchor_dt.month, anchor_dt.day,
-            anchor_dt.hour + anchor_dt.minute / 60.0 + anchor_dt.second / 3600.0,
-            swe.GREG_CAL,
-        )
+        if request.anchor_local:
+            anchor_jd = calculate_julian_day(anchor_dt.year, anchor_dt.month, anchor_dt.day,
+                                             anchor_dt.hour, anchor_dt.minute, request.lat, request.lon)
+        else:
+            anchor_jd = swe.julday(
+                anchor_dt.year, anchor_dt.month, anchor_dt.day,
+                anchor_dt.hour + anchor_dt.minute / 60.0 + anchor_dt.second / 3600.0,
+                swe.GREG_CAL,
+            )
         birth_jd = calculate_julian_day(
             request.birth_year, request.birth_month, request.birth_day,
             request.birth_hour, request.birth_min, request.lat, request.lon,
@@ -1999,6 +2007,7 @@ def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify
         return {
             "body": request.body,
             "period_mode": request.period_mode,
+            "anchor_ut": jd_to_iso(anchor_jd),
             # The birthplace's IANA zone (the same lookup that turns the birth
             # time into UT): the report prints every date in birthplace time.
             "time_zone": TimezoneFinder().timezone_at(lat=request.lat, lng=request.lon) or "UTC",
