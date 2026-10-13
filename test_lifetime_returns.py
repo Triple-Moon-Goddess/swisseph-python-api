@@ -55,7 +55,7 @@ def main():
     check("every solar return is on or beside the birthday",
           all(r["date"][5:10] in ("12-31", "01-01", "01-02") for r in sun), sorted({r["date"][5:10] for r in sun}))
     check("first solar return is age 1, not the birth instant", sun[0]["date"].startswith("1991-01-01"), sun[0]["date"])
-    check("solar return sits at the natal Sun degree", abs(server.wrap180(sun[0]["longitude"] - natal["sun"])) < 1e-3, sun[0]["longitude"])
+    check("solar return sits at the natal Sun degree", abs(server.wrap180(sun[0]["longitude"] - natal["sun"])) < 1e-3)
     check("crossings carry sign, degree and direction", all({"sign", "degree", "is_retro"} <= set(r) for r in sun))
 
     saturn = out["returns"]["saturn"]

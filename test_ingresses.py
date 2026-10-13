@@ -107,13 +107,12 @@ def main():
     check("one entry per instant", len(lout["longitudes"]) == 2, str(lout["count"]))
     equinox_sun = lout["longitudes"]["2026-09-22T19:00:00"]["sun"]
     check("Sun just shy of 180.0 five hours before the 2026 Libra ingress (00:05 UT Sep 23)",
-          179.7 < equinox_sun < 180.0, f"sun={equinox_sun}")
+          179.7 < equinox_sun < 180.0)
     march_sun = lout["longitudes"]["2026-03-20T15:00:00"]["sun"]
     check("Sun ~0.0/360 near the 2026 Aries ingress (equinox ~14:46 UT)",
-          march_sun < 0.2 or march_sun > 359.8, f"sun={march_sun}")
-    for instant, by_body in lout["longitudes"].items():
-        for body, lon in by_body.items():
-            check(f"{body}@{instant} in [0,360)", 0 <= lon < 360, str(lon))
+          march_sun < 0.2 or march_sun > 359.8)
+    check("every longitude in [0,360)",
+          all(0 <= lon < 360 for by_body in lout["longitudes"].values() for lon in by_body.values()))
 
     print()
     if failures:
