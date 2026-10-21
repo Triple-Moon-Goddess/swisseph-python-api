@@ -1,7 +1,9 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
+fastapi==0.150.0
+starlette==1.7.0
+anyio==4.15.1
+uvicorn[standard]==0.54.0
 pyswisseph==2.10.3.2
-pydantic==2.5.0
+pydantic==2.14.1
 timezonefinder==6.5.0
 pytz==2024.1
 slowapi==0.1.9
