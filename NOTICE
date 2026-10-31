@@ -36,3 +36,20 @@ Copyright (C) Sebastián Ramírez
 License: MIT
 
 Other Python dependencies are listed in requirements.txt with their respective licenses.
+
+================================================================================
+
+SWISS EPHEMERIS NOTICE
+
+This software uses the Swiss Ephemeris, which is Copyright (C) 1997-2021
+Astrodienst AG, Switzerland. All rights reserved.
+
+Swiss Ephemeris is distributed under AGPL-3.0 license.
+For more information: https://www.astro.com/swisseph/
+
+The names of the authors or of the copyright holder (Astrodienst) may not
+be used for promoting any software, product or service which uses or contains
+the Swiss Ephemeris without written permission.
+
+The trademarks 'Swiss Ephemeris' and 'Swiss Ephemeris inside' may be used
+for promoting such software, products or services.
