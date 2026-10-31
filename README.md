@@ -9,13 +9,6 @@ docker build -t swisseph-api .
 docker run -p 8000:8000 -e API_KEY=your-key swisseph-api
 ```
 
-## Deploy to Railway
-
-1. Fork this repository
-2. Connect to Railway.app
-3. Set environment variable: `API_KEY=your-generated-key`
-4. Deploy
-
 ## API Endpoints
 
 - `GET /` - Health check
@@ -38,7 +31,7 @@ All endpoints require `X-API-Key` header (except health check).
 
 This program is licensed under **GNU Affero General Public License v3.0 (AGPL-3.0)**.
 
-See [LICENSE](LICENSE) for full text.
+See [LICENSE](LICENSE) for full text. Source: https://github.com/Triple-Moon-Goddess/swisseph-python-api
 
 This software uses **Swiss Ephemeris** by Astrodienst AG, which is also AGPL-3.0 licensed.
 Website: https://www.astro.com/swisseph/
