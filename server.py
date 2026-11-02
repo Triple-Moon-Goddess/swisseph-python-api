@@ -43,23 +43,36 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI
 app = FastAPI(title="Swiss Ephemeris API", version="1.0.0")
 
-# API Key Security (transitional)
+# Caller authentication
 #
-# Callers authenticate to this service with a Google-signed OIDC identity token
-# (audience = this service's URL) that Cloud Run's IAM front door verifies before
-# a request reaches this process. The static X-API-Key below is the legacy
-# second check kept only until `allUsers` is removed from the service's invoker
-# policy; it is then deleted along with the SWISS_EPH_API_KEY secret.
+# Two modes, chosen by environment; with neither set the server refuses to start,
+# so it can never come up open by accident:
 #
-# There is deliberately NO default value: a deployment without API_KEY must fail
-# at startup rather than silently accept a well-known placeholder key.
-API_KEY = os.getenv("API_KEY")
-if not API_KEY:
-    raise RuntimeError("API_KEY environment variable is not set — refusing to start with no credential.")
+#   AUTH_MODE=cloud-run-iam  Cloud Run's IAM front door is the only gate: callers
+#                            send a Google-signed OIDC identity token that Cloud Run
+#                            verifies (roles/run.invoker) before a request reaches
+#                            this process. No application key is checked. TMG runs
+#                            this mode (its service has no allUsers invoker).
+#   API_KEY=<secret>         every request must carry it in the X-API-Key header,
+#                            compared in constant time. For a deployment without an
+#                            IAM front door (local Docker, other hosts).
+#
+# API_KEY wins if both are set.
+API_KEY = os.getenv("API_KEY") or None
+AUTH_MODE = os.getenv("AUTH_MODE", "").strip()
+IAM_ONLY = API_KEY is None and AUTH_MODE == "cloud-run-iam"
+if API_KEY is None and not IAM_ONLY:
+    raise RuntimeError(
+        "No caller authentication configured: set API_KEY, or AUTH_MODE=cloud-run-iam "
+        "when Cloud Run IAM alone admits callers. Refusing to start open."
+    )
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 async def verify_api_key(api_key: str = Security(api_key_header)):
-    """Verify the API key from request header (constant-time compare)."""
+    """Check the X-API-Key header (constant-time) unless Cloud Run IAM is the only gate."""
+    if IAM_ONLY:
+        return None
+
     if api_key is None:
         logger.warning("API key missing")
         raise HTTPException(status_code=403, detail="API key is missing")
@@ -72,11 +85,11 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
 
 # CORS Configuration
 # Google Apps Script makes server-to-server requests and may not send Origin headers
-# Allow all origins but enforce API key authentication for security
+# Allow all origins; callers are authenticated as above (IAM identity token or API key)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # API key authentication provides security
-    allow_credentials=False,  # Not needed for API key auth
+    allow_origins=["*"],  # authentication is IAM or API key, not origin
+    allow_credentials=False,  # no cookies or browser credentials are used
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "X-API-Key"],
 )
