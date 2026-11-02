@@ -7,6 +7,8 @@ REST API for astrological calculations using Swiss Ephemeris.
 ```bash
 docker build -t swisseph-api .
 docker run -p 8000:8000 -e API_KEY=your-key swisseph-api
+# On Cloud Run with no public invoker, IAM can be the only gate instead:
+#   AUTH_MODE=cloud-run-iam  (no API_KEY)
 ```
 
 ## API Endpoints
@@ -25,7 +27,7 @@ docker run -p 8000:8000 -e API_KEY=your-key swisseph-api
 - `POST /api/annual-transits` - One chart's transit year: Sun–angle conjunctions, eclipses, retrograde periods, outer-planet sign changes (natal houses)
 - `POST /api/lifetime-returns` - Every exact return of each body from birth (Mercury → Uranus, Moon excluded) plus Uranus opposition passes, dates only
 
-All endpoints require `X-API-Key` header (except health check).
+Every endpoint except the health check requires the `X-API-Key` header when `API_KEY` is set. With `AUTH_MODE=cloud-run-iam` and no `API_KEY`, Cloud Run IAM (an identity token from an account holding `roles/run.invoker`) is the only gate. With neither set, the server refuses to start.
 
 ## License
 
