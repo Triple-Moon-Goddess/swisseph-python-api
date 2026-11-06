@@ -9,8 +9,13 @@ WORKDIR /app
 # Copy requirements and install dependencies
 COPY requirements.txt .
 # setuptools and wheel are build tools the server never imports; removing them drops their
-# vulnerable vendored packages (wheel, jaraco.context) from the image (R22)
-RUN pip install --no-cache-dir -r requirements.txt && pip uninstall -y setuptools wheel
+# vulnerable vendored packages (wheel, jaraco.context) from the image (R22). pip is only
+# needed for this install, so it goes too, with the copy of pip that ensurepip bundles
+# (risk register R-003: the image carried pip 24 with Medium advisories).
+RUN pip install --no-cache-dir -r requirements.txt && pip uninstall -y setuptools wheel \
+    && python3 -m pip uninstall -y pip \
+    && rm -f /usr/local/lib/python3*/ensurepip/_bundled/pip-*.whl \
+    && ! python3 -c "import pip" 2>/dev/null
 
 # Copy ephemeris data
 COPY ephe/ /app/ephe/
