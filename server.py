@@ -1087,7 +1087,10 @@ def jd_to_iso(jd: float) -> str:
     return datetime(y, m, d, H, M, S).isoformat()
 
 
-def bisect_classification(j1: float, j2: float, classify, tol: float = 3.5e-4) -> float:
+CLASSIFICATION_TOL_DAYS = 3.5e-4
+
+
+def bisect_classification(j1: float, j2: float, classify, tol: float = CLASSIFICATION_TOL_DAYS) -> float:
     """Refine the moment a classification (sign index / house number) flips
     between j1 and j2. Pure comparison bisection — no longitude-boundary root
     needed, so it is immune to the 0/360 wrap and to retrograde direction.
@@ -2454,12 +2457,13 @@ def find_sign_transitions(bodies, start_jd: float, natal_cusps) -> list:
         if entered_jd is None or next_jd is None:
             raise HTTPException(status_code=500, detail=f"No sign boundary for {body} within the search horizon")
         current_sign = lon_to_sign_degree(get_transit_lon(start_jd, planet_id))["sign"]
-        # Sample a hair past each boundary so the placement reports the sign
-        # actually entered rather than the boundary degree itself.
-        entered = annual_placement(entered_jd + 1e-4, planet_id, natal_cusps)
+        # The bisected instant can sit up to half the tolerance before the true
+        # boundary, so sample a full tolerance past it: the placement then
+        # reports the sign actually entered, never "Leo 30°" for Virgo 0°.
+        entered = annual_placement(entered_jd + CLASSIFICATION_TOL_DAYS, planet_id, natal_cusps)
         entered["date"] = jd_to_iso(entered_jd)
         entered["jd"] = round(entered_jd, 6)
-        nxt = annual_placement(next_jd + 1e-4, planet_id, natal_cusps)
+        nxt = annual_placement(next_jd + CLASSIFICATION_TOL_DAYS, planet_id, natal_cusps)
         nxt["date"] = jd_to_iso(next_jd)
         nxt["jd"] = round(next_jd, 6)
         transitions.append({

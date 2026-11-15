@@ -115,6 +115,14 @@ def main():
     check("the current-sign entry is the LAST ingress into it (Pluto's 2023/2024 dips are not it)",
           signs["pluto"]["current"]["date"] > "2024-06-01")
     check("next rows carry the sign left", all(s["next"]["from"] == s["current"]["sign"] for s in out["sign_transitions"]))
+    # A bisected boundary can land a few seconds short of the cusp; the row
+    # must still report the sign entered (never "Leo 30°" for Virgo 0°).
+    # Direct rows only: a retrograde entry sits at ~29.99999° and rounds to 30.
+    bad = [(s["body"], k, s[k]["sign"], s[k]["degree"]) for s in out["sign_transitions"] for k in ("current", "next")
+           if not s[k]["retrograde"] and (not (0 <= s[k]["degree"] < 30)
+                                          or server.SIGNS[int(s[k]["longitude"] % 360 // 30)] != s[k]["sign"])]
+    check("direct transition rows are in the sign entered, degree under 30", not bad, str(bad))
+    check("next rows change sign", all(s["next"]["sign"] != s["next"]["from"] for s in out["sign_transitions"]))
     check("every transition placement has a natal house",
           all(1 <= s[k]["natal_house"] <= 12 for s in out["sign_transitions"] for k in ("current", "next")))
 
