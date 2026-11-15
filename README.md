@@ -11,6 +11,17 @@ docker run -p 8000:8000 -e API_KEY=your-key swisseph-api
 #   AUTH_MODE=cloud-run-iam  (no API_KEY)
 ```
 
+## Tests
+
+Every `test_*.py` runs inside the built image, which has no pip (`test_no_pip_in_image.py`). `Dockerfile.test` adds the tests and httpx without replacing any of the image's packages:
+
+```bash
+docker buildx build --platform linux/amd64 --load -t swisseph-api .
+docker buildx build --platform linux/amd64 --load --build-arg IMAGE=swisseph-api -f Dockerfile.test -t swisseph-api-test .
+docker run --rm --platform linux/amd64 -e AUTH_MODE=cloud-run-iam --entrypoint sh swisseph-api-test \
+  -c 'for t in test_*.py; do python "$t" || echo "FAILED $t"; done'
+```
+
 ## Ephemeris files
 
 `ephe/` holds Swiss Ephemeris data from Astrodienst's official source (https://www.astro.com/ftp/swisseph/ephe/); the planet, moon and main-asteroid files (`sepl_18`, `semo_18`, `seas_18`) are the 2026-05-26 release based on JPL DE441. Chiron, Ceres, Pallas, Juno and Vesta come from `seas_18.se1`; `ast2/se02060.se1` is numbered Chiron. At startup `download_asteroids.py` checks each numbered-asteroid file has a real `SWISSEPH` header and fetches it again over HTTPS if not. `test_ephe_files.py` fails if any `ephe/` file is HTML.

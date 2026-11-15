@@ -1,0 +1,18 @@
+# The in-image test layer (SOP 57 §2): the real image plus the test files and httpx, which
+# FastAPI's TestClient needs. The image has no pip, so httpx is installed in a separate stage
+# and added through a .pth file, which Python appends after site-packages: the image's own
+# packages (anyio, idna, ...) are never replaced by the test tools.
+#   docker buildx build --platform linux/amd64 --load -t swisseph:<tag> .
+#   docker buildx build --platform linux/amd64 --load --build-arg IMAGE=swisseph:<tag> \
+#     -f Dockerfile.test -t swisseph:<tag>-test .
+#   docker run --rm --platform linux/amd64 -e AUTH_MODE=cloud-run-iam --entrypoint sh \
+#     swisseph:<tag>-test -c 'for t in test_*.py; do python "$t" || echo "FAILED $t"; done'
+ARG IMAGE=swisseph:local
+FROM python:3.11-slim AS testtools
+RUN pip install --no-cache-dir --no-deps --target /testtools httpx httpcore h11 certifi idna sniffio
+
+FROM ${IMAGE}
+COPY --from=testtools /testtools /testtools
+RUN echo /testtools > /usr/local/lib/python3.11/site-packages/zz-testtools.pth
+COPY test_*.py /app/
+WORKDIR /app
