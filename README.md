@@ -13,7 +13,7 @@ docker run -p 8000:8000 -e API_KEY=your-key swisseph-api
 
 ## Ephemeris files
 
-`ephe/` holds Swiss Ephemeris data from Astrodienst's official source (https://www.astro.com/ftp/swisseph/ephe/). Chiron, Ceres, Pallas, Juno and Vesta come from `seas_18.se1`; `ast2/se02060.se1` is numbered Chiron. At startup `download_asteroids.py` checks each numbered-asteroid file has a real `SWISSEPH` header and fetches it again over HTTPS if not. `test_ephe_files.py` fails if any `ephe/` file is HTML.
+`ephe/` holds Swiss Ephemeris data from Astrodienst's official source (https://www.astro.com/ftp/swisseph/ephe/); the planet, moon and main-asteroid files (`sepl_18`, `semo_18`, `seas_18`) are the 2026-05-26 release based on JPL DE441. Chiron, Ceres, Pallas, Juno and Vesta come from `seas_18.se1`; `ast2/se02060.se1` is numbered Chiron. At startup `download_asteroids.py` checks each numbered-asteroid file has a real `SWISSEPH` header and fetches it again over HTTPS if not. `test_ephe_files.py` fails if any `ephe/` file is HTML.
 
 ## API Endpoints
 
