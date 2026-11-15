@@ -32,6 +32,7 @@ from typing import Optional, List, Dict
 from timezonefinder import TimezoneFinder
 import pytz
 import os
+import threading
 import logging
 import hashlib
 import hmac
@@ -273,12 +274,25 @@ def lon_to_sign_degree(lon: float):
         "full_degree": lon
     }
 
+# One TimezoneFinder for the process: building it reads its data files (about
+# 0.4 s), so it is built once at import instead of per request. Its lookups
+# seek and read shared file handles, and endpoints run in a thread pool, so
+# lookups are serialised (each takes milliseconds).
+_TIMEZONE_FINDER = TimezoneFinder()
+_TIMEZONE_FINDER_LOCK = threading.Lock()
+
+
+def timezone_at(lat: float, lon: float) -> Optional[str]:
+    """IANA zone name at a point, or None (open ocean)."""
+    with _TIMEZONE_FINDER_LOCK:
+        return _TIMEZONE_FINDER.timezone_at(lat=lat, lng=lon)
+
+
 def calculate_julian_day(year: int, month: int, day: int, hour: int, minute: int, lat: float = None, lon: float = None):
     """Calculate Julian Day - converts local time to UTC if lat/lon provided"""
     if lat is not None and lon is not None:
         # Find timezone and convert local time to UTC
-        tf = TimezoneFinder()
-        tz_name = tf.timezone_at(lat=lat, lng=lon)
+        tz_name = timezone_at(lat, lon)
 
         if tz_name:
             try:
@@ -2073,7 +2087,7 @@ def get_return_chart(request: ReturnChartRequest, api_key: str = Security(verify
             "anchor_ut": jd_to_iso(anchor_jd),
             # The birthplace's IANA zone (the same lookup that turns the birth
             # time into UT): the report prints every date in birthplace time.
-            "time_zone": TimezoneFinder().timezone_at(lat=request.lat, lng=request.lon) or "UTC",
+            "time_zone": timezone_at(request.lat, request.lon) or "UTC",
             "return": {
                 "moment": jd_to_iso(period["moment"]),
                 "passes": [jd_to_iso(jd) for jd in period["passes"]],
