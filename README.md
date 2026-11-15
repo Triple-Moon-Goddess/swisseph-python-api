@@ -17,7 +17,7 @@ docker run -p 8000:8000 -e API_KEY=your-key swisseph-api
 - `POST /api/planets` - Planetary positions
 - `POST /api/houses` - House cusps
 - `POST /api/chart` - Complete chart
-- `POST /api/transits` - Transit calculations
+- `POST /api/transits` - Transit calculations (limits: `end_date` after `start_date` and at most 731 days later; at most 24 `natal_positions`, 6 `aspects`, 10 `transiting_planets` with no duplicates; anything over gets 422)
 - `POST /api/stations` - Retrograde/direct stations
 - `POST /api/ingresses` - Sign + natal-house ingresses over a window
 - `POST /api/orb-windows` - In-orb windows against natal points

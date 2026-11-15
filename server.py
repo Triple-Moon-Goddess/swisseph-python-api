@@ -24,7 +24,7 @@ Website: https://www.astro.com/swisseph/
 from fastapi import FastAPI, HTTPException, Security, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, field_validator, ValidationError
+from pydantic import BaseModel, field_validator, model_validator, ValidationError
 import swisseph as swe
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -528,6 +528,14 @@ def get_chart(request: ChartRequest, api_key: str = Security(verify_api_key)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error calculating chart: {str(e)}")
 
+# Work per request is span x natal points x aspects x transiting bodies, so each
+# factor is capped. Natal points: callers send 11 bodies plus each one's "_opp"
+# anti-point (22), so 24 leaves room for two more.
+TRANSIT_SPAN_DAYS_MAX = 731  # two years, leap day included
+TRANSIT_NATAL_POSITIONS_MAX = 24
+TRANSIT_ASPECTS_MAX = 6  # Conjunction, Sextile, Square, Trine, Quincunx, Opposition
+TRANSIT_PLANETS_MAX = 10  # sun through pluto
+
 # Transit Request Model with validation
 class TransitRequest(BaseModel):
     natal_positions: Dict[str, float]  # e.g., {"Sun": 26.57, "Moon": 109.35, ...}
@@ -556,6 +564,8 @@ class TransitRequest(BaseModel):
     def validate_natal_positions(cls, v):
         if not v or len(v) == 0:
             raise ValueError('Natal positions cannot be empty')
+        if len(v) > TRANSIT_NATAL_POSITIONS_MAX:
+            raise ValueError(f'At most {TRANSIT_NATAL_POSITIONS_MAX} natal positions per request, got {len(v)}')
         for planet, lon in v.items():
             if lon < 0 or lon > 360:
                 raise ValueError(f'{planet} longitude must be between 0 and 360')
@@ -569,6 +579,35 @@ class TransitRequest(BaseModel):
         except ValueError:
             raise ValueError('Date must be in ISO format (YYYY-MM-DD)')
         return v
+
+    @field_validator('transiting_planets')
+    @classmethod
+    def validate_transiting_planets(cls, v):
+        if v is None:
+            return v
+        if len(v) > TRANSIT_PLANETS_MAX:
+            raise ValueError(f'At most {TRANSIT_PLANETS_MAX} transiting planets per request, got {len(v)}')
+        duplicates = sorted({p for p in v if v.count(p) > 1})
+        if duplicates:
+            raise ValueError(f'transiting_planets has duplicates: {duplicates}')
+        return v
+
+    @field_validator('aspects')
+    @classmethod
+    def validate_aspects(cls, v):
+        if v is not None and len(v) > TRANSIT_ASPECTS_MAX:
+            raise ValueError(f'At most {TRANSIT_ASPECTS_MAX} aspects per request, got {len(v)}')
+        return v
+
+    @model_validator(mode='after')
+    def validate_date_span(self):
+        start = datetime.fromisoformat(self.start_date).date()
+        end = datetime.fromisoformat(self.end_date).date()
+        if end <= start:
+            raise ValueError('end_date must be after start_date')
+        if (end - start).days > TRANSIT_SPAN_DAYS_MAX:
+            raise ValueError(f'start_date to end_date can span at most {TRANSIT_SPAN_DAYS_MAX} days (2 years), got {(end - start).days}')
+        return self
 
     @field_validator('lat')
     @classmethod
