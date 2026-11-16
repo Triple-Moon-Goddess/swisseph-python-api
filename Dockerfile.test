@@ -8,11 +8,15 @@
 #   docker run --rm --platform linux/amd64 -e AUTH_MODE=cloud-run-iam --entrypoint sh \
 #     swisseph:<tag>-test -c 'for t in test_*.py; do python "$t" || echo "FAILED $t"; done'
 ARG IMAGE=swisseph:local
-FROM python:3.11-slim AS testtools
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535 AS testtools
 RUN pip install --no-cache-dir --no-deps --target /testtools httpx httpcore h11 certifi idna sniffio
 
 FROM ${IMAGE}
+# The image runs as uid 10001; adding the test tools needs root, then the tests run as the
+# server's own user, so they see what the server sees (test_dockerfile.py checks the user).
+USER root
 COPY --from=testtools /testtools /testtools
 RUN echo /testtools > /usr/local/lib/python3.11/site-packages/zz-testtools.pth
 COPY test_*.py /app/
+USER 10001
 WORKDIR /app
