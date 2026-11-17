@@ -22,6 +22,17 @@ docker run --rm --platform linux/amd64 -e AUTH_MODE=cloud-run-iam --entrypoint s
   -c 'for t in test_*.py; do python "$t" || echo "FAILED $t"; done'
 ```
 
+## Build, test and push for Cloud Run (Mac mini only)
+
+The image Cloud Run serves is built, tested in the image and pushed on the Mac mini only. The laptop keeps no cloud sign-in (TMG SOP 51), so `scripts/image.sh` refuses to run on any other host:
+
+```bash
+scripts/image.sh build <tag>                           # linux/amd64 build, test layer, every test_*.py in the image; fails if any fails
+scripts/image.sh push <tag> triple-moon-goddess-dev    # under the one-hour push grant: sign in on stdin, push, print the digest, sign out
+```
+
+`DRY_RUN=1` prints the commands instead of running them. `test_image_script.py` checks the host refusal, the build steps and that Docker is signed out after a push. Deploy by digest and the checks after it are in TMG SOP 57 §3–§4.
+
 ## Ephemeris files
 
 `ephe/` holds Swiss Ephemeris data from Astrodienst's official source (https://www.astro.com/ftp/swisseph/ephe/); the planet, moon and main-asteroid files (`sepl_18`, `semo_18`, `seas_18`) are the 2026-05-26 release based on JPL DE441. Chiron, Ceres, Pallas, Juno and Vesta come from `seas_18.se1`; `ast2/se02060.se1` is numbered Chiron. At startup `download_asteroids.py` checks each numbered-asteroid file has a real `SWISSEPH` header and fetches it again over HTTPS if not. `test_ephe_files.py` fails if any `ephe/` file is HTML.
