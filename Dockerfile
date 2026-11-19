@@ -30,6 +30,11 @@ COPY download_asteroids.py .
 # Run as an unprivileged user, not root (SOP 56 §2). It owns only the ephemeris folder, which
 # download_asteroids.py may refill at startup; the code and libraries stay root-owned.
 RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin app && chown -R app:app /app/ephe
+# CIS Docker Benchmark v1.6.0 4.8 (SOP 56 §2): clear every setuid and setgid bit, so no program in
+# the image (su, passwd, mount, chage, ...) can run with more rights than uid 10001. The server
+# uses none of them. This is the last step that writes files; scripts/image.sh build fails if any
+# bit is left (find as root in the built image), and test_dockerfile.py checks the order.
+RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 USER 10001
 
 # Expose port (Cloud Run will set PORT env var, default to 8000 for local dev)

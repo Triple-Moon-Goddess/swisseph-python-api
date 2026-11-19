@@ -27,11 +27,11 @@ docker run --rm --platform linux/amd64 -e AUTH_MODE=cloud-run-iam --entrypoint s
 The image Cloud Run serves is built, tested in the image and pushed on the Mac mini only. The laptop keeps no cloud sign-in (TMG SOP 51), so `scripts/image.sh` refuses to run on any other host:
 
 ```bash
-scripts/image.sh build <tag>                           # linux/amd64 build, test layer, every test_*.py in the image; fails if any fails
+scripts/image.sh build <tag>                           # linux/amd64 build, no setuid/setgid file left, test layer, every test_*.py in the image; fails if any fails
 scripts/image.sh push <tag> triple-moon-goddess-dev    # under the one-hour push grant: sign in on stdin, push, print the digest, sign out
 ```
 
-`DRY_RUN=1` prints the commands instead of running them. `test_image_script.py` checks the host refusal, the build steps and that Docker is signed out after a push. Deploy by digest and the checks after it are in TMG SOP 57 §3–§4.
+`DRY_RUN=1` prints the commands instead of running them. `test_image_script.py` checks the host refusal, the build steps (including that a setuid or setgid file left in the image fails the build, CIS Docker Benchmark 4.8) and that Docker is signed out after a push. Deploy by digest and the checks after it are in TMG SOP 57 §3–§4.
 
 ## Ephemeris files
 

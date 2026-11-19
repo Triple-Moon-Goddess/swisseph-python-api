@@ -6,7 +6,8 @@
 # refuses to run on any other host. The check is a guard against running it by mistake on
 # the wrong machine, not an access control: access is the one-hour grant itself.
 #
-#   scripts/image.sh build <tag>             build linux/amd64, add the test layer, run every
+#   scripts/image.sh build <tag>             build linux/amd64, check no setuid/setgid file is
+#                                            left (CIS Docker 4.8), add the test layer, run every
 #                                            test_*.py in the image (non-zero if any fails)
 #   scripts/image.sh push <tag> <project>    tag for Artifact Registry, sign Docker in with a
 #                                            lisahagan@ token on stdin, push, print the digest,
@@ -53,9 +54,25 @@ valid_project() {
   esac
 }
 
+# CIS Docker Benchmark 4.8: no file in the image may keep a setuid or setgid bit. find runs as
+# root, so it reads every folder (the tests run as uid 10001 and cannot); any path it prints, or
+# a find that fails, fails the build.
+setuid_check() {
+  local img="$1" found
+  if [ "${DRY_RUN:-}" = 1 ]; then
+    run docker run --rm --platform linux/amd64 --user 0 --entrypoint find "$img" / -xdev -perm /6000 -type f
+    return 0
+  fi
+  found="$(docker run --rm --platform linux/amd64 --user 0 --entrypoint find "$img" / -xdev -perm /6000 -type f)" ||
+    die "the setuid/setgid check could not run on ${img}"
+  [ -z "$found" ] || die "setuid/setgid files left in ${img} (CIS Docker 4.8): $(printf '%s' "$found" | tr '\n' ' ')"
+  echo "setuid/setgid files in ${img}: 0"
+}
+
 cmd_build() {
   local tag="$1"
   run docker buildx build --platform linux/amd64 --load -t "swisseph:${tag}" "$REPO_ROOT"
+  setuid_check "swisseph:${tag}"
   run docker buildx build --platform linux/amd64 --load --build-arg "IMAGE=swisseph:${tag}" \
     -f "$REPO_ROOT/Dockerfile.test" -t "swisseph:${tag}-test" "$REPO_ROOT"
   # Every test file must exit 0; a failure makes the whole run fail.
