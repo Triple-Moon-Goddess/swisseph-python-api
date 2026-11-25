@@ -27,7 +27,7 @@ docker run --rm --platform linux/amd64 -e AUTH_MODE=cloud-run-iam --entrypoint s
 The image Cloud Run serves is built, tested in the image and pushed on the Mac mini only. The laptop keeps no cloud sign-in (TMG SOP 51), so `scripts/image.sh` refuses to run on any other host:
 
 ```bash
-scripts/image.sh build <tag>                           # linux/amd64 build, no setuid/setgid file left, test layer, every test_*.py in the image; fails if any fails
+scripts/image.sh build <tag>                           # linux/amd64 build with Docker's cache off, no setuid/setgid file left, no OS package with an update not installed, test layer, every test_*.py in the image; fails if any fails
 scripts/image.sh push <tag> triple-moon-goddess-dev    # under the one-hour push grant: sign in on stdin, push, print the digest, sign out
 ```
 

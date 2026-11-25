@@ -6,9 +6,11 @@
 # refuses to run on any other host. The check is a guard against running it by mistake on
 # the wrong machine, not an access control: access is the one-hour grant itself.
 #
-#   scripts/image.sh build <tag>             build linux/amd64, check no setuid/setgid file is
-#                                            left (CIS Docker 4.8), add the test layer, run every
-#                                            test_*.py in the image (non-zero if any fails)
+#   scripts/image.sh build <tag>             build linux/amd64 with Docker's cache off, check no
+#                                            setuid/setgid file is left (CIS Docker 4.8) and no OS
+#                                            package has a Debian update that is not installed, add
+#                                            the test layer, run every test_*.py in the image
+#                                            (non-zero if any fails)
 #   scripts/image.sh push <tag> <project>    tag for Artifact Registry, sign Docker in with a
 #                                            lisahagan@ token on stdin, push, print the digest,
 #                                            and always sign Docker out again
@@ -69,10 +71,40 @@ setuid_check() {
   echo "setuid/setgid files in ${img}: 0"
 }
 
+# Debian publishes security fixes after an image is built, and the image scan then fails on the
+# image prod is serving (2026-11-25: libzstd1, CVE-2026-124851). The Dockerfile upgrades the OS
+# packages at build, but Docker reuses that layer from its cache unless it is told not to, so a
+# rebuild on the same machine kept the old packages. The build therefore runs with the cache off,
+# and this check proves the result: apt runs as root in the built image, and any package it would
+# still upgrade, or an apt that fails, fails the build.
+os_updates_check() {
+  local img="$1" out pending held
+  local probe='apt-get update -qq >/dev/null 2>&1 && LC_ALL=C apt-get -s upgrade'
+  if [ "${DRY_RUN:-}" = 1 ]; then
+    run docker run --rm --platform linux/amd64 --user 0 --entrypoint sh "$img" -c "$probe"
+    return 0
+  fi
+  out="$(docker run --rm --platform linux/amd64 --user 0 --entrypoint sh "$img" -c "$probe")" ||
+    die "the OS package check could not run on ${img}"
+  # apt's summary line: "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded."
+  printf '%s\n' "$out" | grep -Eq '^[0-9]+ upgraded, .* and [0-9]+ not upgraded\.$' ||
+    die "the OS package check on ${img} gave no answer from apt"
+  pending="$(printf '%s\n' "$out" | sed -n 's/^Inst \([^ ]*\) \[\([^]]*\)\] (\([^ ]*\).*/\1 \2 -> \3;/p' | tr '\n' ' ')"
+  [ -z "$pending" ] ||
+    die "OS packages in ${img} have a Debian update that is not installed: ${pending% }"
+  held="$(printf '%s\n' "$out" | sed -n 's/^[0-9]* upgraded, .* and \([0-9]*\) not upgraded\.$/\1/p')"
+  [ "$held" = 0 ] ||
+    die "${held} OS package(s) in ${img} have an update that 'apt-get upgrade' holds back"
+  echo "OS packages in ${img} with an update not installed: 0"
+}
+
 cmd_build() {
   local tag="$1"
-  run docker buildx build --platform linux/amd64 --load -t "swisseph:${tag}" "$REPO_ROOT"
+  # --no-cache: every layer is built now, so 'apt-get upgrade' installs today's fixes.
+  # --pull: the pinned base is read from the registry, not from a local copy.
+  run docker buildx build --no-cache --pull --platform linux/amd64 --load -t "swisseph:${tag}" "$REPO_ROOT"
   setuid_check "swisseph:${tag}"
+  os_updates_check "swisseph:${tag}"
   run docker buildx build --platform linux/amd64 --load --build-arg "IMAGE=swisseph:${tag}" \
     -f "$REPO_ROOT/Dockerfile.test" -t "swisseph:${tag}-test" "$REPO_ROOT"
   # Every test file must exit 0; a failure makes the whole run fail.
