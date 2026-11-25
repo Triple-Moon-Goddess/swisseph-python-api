@@ -1,6 +1,7 @@
 # Pinned to one image (python:3.11-slim, multi-arch index, read 2026-11-16) so a rebuild cannot
 # pick up an unreviewed base (SOP 56 §2). Bump the digest on purpose; OS packages are still
-# patched below at every build.
+# patched below at every build. That holds only when Docker's cache is off: scripts/image.sh
+# builds with --no-cache --pull and fails if a package is left with an update not installed.
 FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535
 
 # Patch OS packages in the base image (R22: acl, perl, attr and zlib advisories)
